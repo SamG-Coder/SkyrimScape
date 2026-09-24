@@ -1,0 +1,10 @@
+/external/
+/build/
+/runtime/
+/backups/
+/.vs/
+/.env
+/.env.*
+*.user
+*.log
+__pycache__/
