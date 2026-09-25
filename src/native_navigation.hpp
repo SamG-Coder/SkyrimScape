@@ -79,7 +79,7 @@ inline GridCache& refreshGrid(){
 }
 inline scape::grid::Result plan(scape::Vec start,scape::Vec finish,bool normalizeGround,
  const std::function<bool(scape::Vec,scape::Vec,scape::nav::Traversal)>& clearTraversal,
- const std::function<bool(scape::Vec)>& goalVisible={}){
+ const std::function<bool(scape::Vec)>& goalVisible={},float actionRadius=80.f){
  auto& cache=refreshGrid();auto& mesh=cache.mesh;
  if(normalizeGround){
   auto floor=scape::nav::surface(mesh,finish,48.f,64.f,40.f);
@@ -89,7 +89,7 @@ inline scape::grid::Result plan(scape::Vec start,scape::Vec finish,bool normaliz
  }
  float maxDrop=180.f;
  if(auto settings=RE::GameSettingCollection::GetSingleton())if(auto setting=settings->GetSetting("fJumpFallHeightMin")){float threshold=setting->GetFloat();if(std::isfinite(threshold)&&threshold>=40.f)maxDrop=(std::min)(512.f,threshold*.75f);}
- auto result=cache.grid.plan(start,finish,clearTraversal,maxDrop,normalizeGround?0.f:80.f,128,std::chrono::milliseconds(4),goalVisible);auto& route=result.route;
+ auto result=cache.grid.plan(start,finish,clearTraversal,maxDrop,normalizeGround?0.f:actionRadius,128,std::chrono::milliseconds(4),goalVisible);auto& route=result.route;
  if(result.pending)return result;
  spdlog::info("GRID result={} cells={} groups={} reused={} rebuilt={} expanded={} collisionChecks={} waypoints={}",result.reason,result.stats.cells,result.stats.groups,result.stats.reused,result.stats.built,result.stats.expanded,result.stats.clearanceChecks,route.points.size());
  if(route.points.empty()){

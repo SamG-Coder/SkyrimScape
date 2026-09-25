@@ -21,6 +21,13 @@ int main(){
  auto alternate=world.plan({67,80,0},{400,240,0},blockedNearest,180,80);
  require(!alternate.route.points.empty(),"A blocked nearest grid centre must allow a validated alternate start connection");
  require(forward.route.points.size()>1&&forward.route.points[1].x>67,"Open-floor first leg must not step backward to the nearest cell");
+ auto blockedGoal=[](Vec a,Vec b,nav::Traversal){
+  if(planarDistance(b,{400,240,0})<1)return planarDistance(a,{400,240,0})<48&&a.y>250;
+  return true;
+ };
+ auto alternateGoal=world.plan({64,64,0},{400,240,0},blockedGoal,180);
+ require(!alternateGoal.route.points.empty()&&planarDistance(alternateGoal.route.points.back(),{400,240,0})<1,"Blocked nearest destination centre must try a validated neighbour and still reach the exact click");
+ require(world.plan({64,64,0},{400,240,0},[](Vec,Vec b,nav::Traversal){return planarDistance(b,{400,240,0})>1;},180).route.points.empty(),"Alternative endpoints must not bypass a blocked destination");
  auto actorBlocks=[](Vec a,Vec b,nav::Traversal){return planarDistance(a,{400,240,0})>30&&planarDistance(b,{400,240,0})>30;};
  auto approach=world.plan({64,240,0},{400,240,0},actorBlocks,180,80);
  require(!approach.route.points.empty(),"Occupied actor center must not prevent an approach route");

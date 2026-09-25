@@ -2,6 +2,8 @@
 #include "runtime_style.hpp"
 #include "style_gpu.hpp"
 #include "style_mesh.hpp"
+#include "roof_policy.hpp"
+#include <mutex>
 #include <atomic>
 #include <chrono>
 #include <future>
@@ -11,25 +13,34 @@ namespace runtime_style {
 namespace {
 using Clock=std::chrono::steady_clock;
 std::atomic_bool gameplay{},enabled{false};
+std::atomic_bool roofsEnabled{true};
+std::mutex roofMutex;bool roofViewActive{},roofInterior{};scape::Vec roofFocus{},roofCamera{};
+// 0.3.16 produced stretched geometry in live play. Keep the implementation
+// available for diagnosis, but never queue or bind replacement index buffers
+// until the engine's per-draw vertex layouts/lifetimes have been validated.
+constexpr bool meshReplacementEnabled=false;
 struct Pass {
- std::array<ID3D11ShaderResourceView*,6> diffuse{};
+ std::array<ID3D11ShaderResourceView*,8> diffuse{};
  ID3D11ShaderResourceView* normal{};
  bool staticMesh{};
+ bool hideRoof{};
+ unsigned indexCount{},vertexCount{};
 };
 thread_local Pass pass;
 using GeometryFn=void(*)(RE::BSShader*,RE::BSRenderPass*,std::uint32_t);
 REL::Relocation<GeometryFn> originalSetup,originalRestore;
+std::array<REL::Relocation<GeometryFn>,3> extraSetup,extraRestore;
 using DrawFn=void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,UINT,UINT,INT);
 ID3D11DeviceContext* gameContext{};
 ComPtr<ID3D11Device> device;
 ComPtr<ID3D11ShaderResourceView> flatNormal;
-template<class T> struct Cached {ComPtr<T> source,replacement;};
+template<class T> struct Cached {ComPtr<T> source,replacement;std::size_t bytes{};};
 std::unordered_map<ID3D11ShaderResourceView*,Cached<ID3D11ShaderResourceView>> textures;
 std::size_t textureBytes{};
 std::unordered_map<ID3D11SamplerState*,Cached<ID3D11SamplerState>> samplers;
 struct Mesh {
  ComPtr<ID3D11Buffer> vertices,indices,replacement;
- unsigned stride{},count{},originalCount{},bytes{};
+ unsigned stride{},count{},originalCount{},vertexCount{},bytes{};
 };
 std::unordered_map<ID3D11Buffer*,Mesh> meshes;
 std::size_t meshBytes{};
@@ -59,37 +70,85 @@ std::size_t retainedTextureBytes(const D3D11_TEXTURE2D_DESC& desc){
 ID3D11ShaderResourceView* view(RE::NiSourceTexture* texture){
  return texture&&texture->rendererTexture?reinterpret_cast<ID3D11ShaderResourceView*>(texture->rendererTexture->resourceView):nullptr;
 }
+bool hideRoof(RE::BSGeometry* geometry,RE::BSLightingShaderMaterialBase* material){
+ if(!geometry||!material||!roofsEnabled.load())return false;
+ // Inspect only objects already owned by this render pass. NiAVObject user
+ // data/parent chains are not a reliable TESObjectREFR mapping for interior
+ // combined geometry, and must never be dereferenced here.
+ std::lock_guard lock(roofMutex);
+ if(!roofViewActive)return false;
+ auto& bound=geometry->worldBound;scape::Vec center{bound.center.x,bound.center.y,bound.center.z};
+ if(geometry->GetGeometryRuntimeData().skinInstance)return false;
+ if(roofInterior)return scape::roof::aboveInteriorCut(center,bound.radius,roofFocus.z-75.f);
+ if(!scape::roof::obstructs(center,bound.radius,roofFocus,roofCamera))return false;
+ bool named=scape::roof::named(geometry->name.c_str()?geometry->name.c_str():"");
+ // Use the bound diffuse texture, not the separately mutable texture set.
+ if(!named&&material->diffuseTexture){auto path=material->diffuseTexture->name.c_str();named=path&&scape::roof::named(path);}
+ if(!named)return false;
+ static std::atomic_bool reported{};
+ if(!reported.exchange(true))spdlog::info("ROOF first camera obstruction hidden: geometry={}",geometry->name.c_str()?geometry->name.c_str():"");
+ return true;
+}
 void setup(RE::BSShader* shader,RE::BSRenderPass* current,std::uint32_t flags){
  static std::atomic_bool reported{};
  if(!reported.exchange(true))spdlog::info("Runtime style diagnostic: lighting geometry hook reached");
  pass={};originalSetup(shader,current,flags);
- if(!enabled.load(std::memory_order_relaxed)||!gameplay.load(std::memory_order_relaxed)||!current||!current->shaderProperty)return;
+ if(!gameplay.load(std::memory_order_relaxed)||!current||!current->shaderProperty)return;
  auto material=current->shaderProperty->material;
  if(!material||material->GetType()!=RE::BSShaderMaterial::Type::kLighting)return;
  auto base=static_cast<RE::BSLightingShaderMaterialBase*>(material);
+ pass.hideRoof=hideRoof(current->geometry,base);
+ if(!enabled.load(std::memory_order_relaxed))return;
  static std::atomic_bool materialReported{};
  if(!materialReported.exchange(true))spdlog::info("Runtime style diagnostic: active lighting material reached, feature={}",static_cast<int>(material->GetFeature()));
  pass.diffuse[0]=view(base->diffuseTexture.get());
  auto feature=material->GetFeature();
+ if(feature==RE::BSShaderMaterial::Feature::kGlowMap)
+  pass.diffuse[6]=view(static_cast<RE::BSLightingShaderMaterialGlowmap*>(base)->glowTexture.get());
  if(feature==RE::BSShaderMaterial::Feature::kMultiTexLandLODBlend){
   auto land=static_cast<RE::BSLightingShaderMaterialLandscape*>(base);
   for(unsigned i=0;i<5;++i)pass.diffuse[i+1]=view(land->landscapeDiffuseTexture[i].get());
  }
+ bool ordinary=feature==RE::BSShaderMaterial::Feature::kDefault||feature==RE::BSShaderMaterial::Feature::kEnvironmentMap||
+  feature==RE::BSShaderMaterial::Feature::kGlowMap||feature==RE::BSShaderMaterial::Feature::kParallax||feature==RE::BSShaderMaterial::Feature::kLODObjectsHD;
  // Tangent-space default materials only. Model-space normal maps and special
  // shaders encode other data and must not receive a generic normal texture.
- if(feature==RE::BSShaderMaterial::Feature::kDefault&&
+ if(ordinary&&
     !current->shaderProperty->flags.any(RE::BSShaderProperty::EShaderPropertyFlag::kModelSpaceNormals))
   pass.normal=view(base->normalTexture.get());
  auto geometry=current->geometry;
  if(geometry&&geometry->GetType()==RE::BSGeometry::Type::kTriShape){
   auto& data=geometry->GetGeometryRuntimeData();
-  pass.staticMesh=!data.skinInstance&&!data.alphaProperty&&
+  bool opaque=!data.alphaProperty||(!data.alphaProperty->GetAlphaBlending()&&!data.alphaProperty->GetAlphaTesting());
+  // SSE float positions can omit FULLPREC. A UV stream beginning at byte 16
+  // also proves the four-float position layout; packed/unknown layouts stay out.
+  bool floatPosition=data.vertexDesc.HasFlag(RE::BSGraphics::Vertex::VF_FULLPREC)||
+   (data.vertexDesc.HasFlag(RE::BSGraphics::Vertex::VF_UV)&&data.vertexDesc.GetAttributeOffset(RE::BSGraphics::Vertex::VA_TEXCOORD0)==16);
+  pass.staticMesh=!data.skinInstance&&opaque&&
    !data.vertexDesc.HasFlag(RE::BSGraphics::Vertex::VF_SKINNED)&&
-   data.vertexDesc.HasFlag(RE::BSGraphics::Vertex::VF_FULLPREC)&&
-   feature==RE::BSShaderMaterial::Feature::kDefault;
+   floatPosition&&ordinary;
+  if(pass.staticMesh)if(auto shape=geometry->AsTriShape()){
+   auto& shapeData=shape->GetTrishapeRuntimeData();pass.indexCount=shapeData.triangleCount*3;pass.vertexCount=shapeData.vertexCount;
+  }
  }
 }
 void restore(RE::BSShader* shader,RE::BSRenderPass* current,std::uint32_t flags){pass={};originalRestore(shader,current,flags);}
+template<unsigned Index>
+void setupExtra(RE::BSShader* shader,RE::BSRenderPass* current,std::uint32_t flags){
+ pass={};extraSetup[Index](shader,current,flags);
+ if(!enabled.load(std::memory_order_relaxed)||!gameplay.load(std::memory_order_relaxed)||!current||!current->shaderProperty)return;
+ pass.diffuse[0]=view(current->shaderProperty->GetBaseTexture());
+ if constexpr(Index==2){
+  auto material=current->shaderProperty->material;
+  if(material&&material->GetType()==RE::BSShaderMaterial::Type::kEffect)
+   pass.diffuse[0]=view(static_cast<RE::BSEffectShaderMaterial*>(material)->sourceTexture.get());
+ }
+ static std::atomic_bool reported{};
+ if(pass.diffuse[0]&&!reported.exchange(true))spdlog::info("Runtime style: {} texture pass reached",Index==0?"grass":Index==1?"distant tree":"effect");
+ // Billboard, wind-animated and alpha-cutout geometry keeps its silhouette.
+}
+template<unsigned Index>
+void restoreExtra(RE::BSShader* shader,RE::BSRenderPass* current,std::uint32_t flags){pass={};extraRestore[Index](shader,current,flags);}
 
 bool staging(ID3D11Buffer* source,ComPtr<ID3D11Buffer>& result){
  D3D11_BUFFER_DESC desc{};source->GetDesc(&desc);
@@ -122,7 +181,8 @@ void poll(ID3D11DeviceContext* context){
  auto ir=context->Map(job.indices.Get(),0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&i);
  if(FAILED(ir)){context->Unmap(job.vertices.Get(),0);if(ir!=DXGI_ERROR_WAS_STILL_DRAWING)pending.reset();return;}
  D3D11_BUFFER_DESC vd{},id{};job.vertices->GetDesc(&vd);job.indices->GetDesc(&id);
- std::vector<unsigned char> vertices(vd.ByteWidth),indices(id.ByteWidth);
+ // GPU allocations may have alignment padding beyond the geometry's counts.
+ std::vector<unsigned char> vertices(job.mesh.vertexCount*job.mesh.stride),indices(job.mesh.originalCount*2);
  std::memcpy(vertices.data(),v.pData,vertices.size());std::memcpy(indices.data(),i.pData,indices.size());
  context->Unmap(job.vertices.Get(),0);context->Unmap(job.indices.Get(),0);
  job.vertices.Reset();job.indices.Reset();
@@ -134,13 +194,16 @@ Mesh* mesh(ID3D11DeviceContext* context,ID3D11Buffer* indices,unsigned count){
  if(auto found=meshes.find(indices);found!=meshes.end()){
   auto& entry=found->second;return entry.vertices.Get()==vertices.Get()&&entry.stride==stride&&entry.originalCount==count?&entry:nullptr;
  }
- if(pending||meshBytes>=meshBudget||meshes.size()>=2048||Clock::now()<nextWork)return nullptr;
+ if(pending||Clock::now()<nextWork)return nullptr;
  nextWork=Clock::now()+std::chrono::milliseconds(50);
  D3D11_BUFFER_DESC vd{},id{};vertices->GetDesc(&vd);indices->GetDesc(&id);
- if(id.ByteWidth!=count*2||vd.ByteWidth%stride||vd.ByteWidth/stride>65535||meshBytes+vd.ByteWidth+id.ByteWidth*2>meshBudget)return nullptr;
+ if(count!=pass.indexCount||!pass.vertexCount||id.ByteWidth<count*2||id.ByteWidth-count*2>=16||vd.ByteWidth<pass.vertexCount*stride)return nullptr;
+ auto required=static_cast<std::size_t>(vd.ByteWidth)+id.ByteWidth*2;
+ if(required>meshBudget)return nullptr;
+ while(!meshes.empty()&&(meshBytes+required>meshBudget||meshes.size()>=2048)){auto old=meshes.begin();meshBytes-=old->second.bytes;meshes.erase(old);}
  auto job=std::make_unique<Pending>();
  if(!staging(vertices.Get(),job->vertices)||!staging(indices,job->indices))return nullptr;
- job->mesh.vertices=vertices;job->mesh.indices=indices;job->mesh.stride=stride;job->mesh.originalCount=count;job->mesh.bytes=vd.ByteWidth+id.ByteWidth;
+ job->mesh.vertices=vertices;job->mesh.indices=indices;job->mesh.stride=stride;job->mesh.originalCount=count;job->mesh.vertexCount=pass.vertexCount;job->mesh.bytes=vd.ByteWidth+id.ByteWidth;
  context->CopyResource(job->vertices.Get(),vertices.Get());context->CopyResource(job->indices.Get(),indices);
  pending=std::move(job);nextWork=Clock::now()+std::chrono::milliseconds(50);return nullptr;
 }
@@ -148,6 +211,7 @@ template<class Submit>
 void styledDraw(ID3D11DeviceContext* context,UINT count,UINT start,INT base,Submit submit){
  static std::atomic_bool reported{};
  if(!reported.exchange(true))spdlog::info("Runtime style diagnostic: indexed draw hook reached; selectedContext={}",context==gameContext);
+ if(context==gameContext&&gameplay.load(std::memory_order_relaxed)&&roofsEnabled.load()&&pass.hideRoof)return;
  if(context!=gameContext||!enabled.load(std::memory_order_relaxed)||!gameplay.load(std::memory_order_relaxed)||!pass.diffuse[0]){submit(count);return;}
  // All changes are scoped to this draw. In particular, Skyrim's state cache
  // still sees the original bindings when we return, as do UI and shadow draws.
@@ -156,6 +220,7 @@ void styledDraw(ID3D11DeviceContext* context,UINT count,UINT start,INT base,Subm
  // bindings have been restored. This caps references retained across cell loads.
  if(textureBytes>240*1024*1024||textures.size()>=2047){textures.clear();textureBytes=0;}
  std::array<ID3D11ShaderResourceView*,16> original{},replacement{};
+ std::array<ComPtr<ID3D11ShaderResourceView>,16> retained;
  context->PSGetShaderResources(0,16,original.data());replacement=original;
  bool changed=false;
  for(unsigned slot=0;slot<16;++slot){
@@ -169,13 +234,16 @@ void styledDraw(ID3D11DeviceContext* context,UINT count,UINT start,INT base,Subm
     D3D11_TEXTURE2D_DESC desc{};texture->GetDesc(&desc);
     // Conservative accounting for retained world color resources, including mip chains.
     auto bytes=retainedTextureBytes(desc);
-    if(textureBytes+bytes<=256*1024*1024){
-     Cached<ID3D11ShaderResourceView> entry;entry.source=source;entry.replacement=smallTexture(device.Get(),source);
+    if(bytes<=256*1024*1024){
+     // Retained per-draw views above protect earlier slots while old entries
+     // are evicted. A full cache must not silently exempt newly seen assets.
+     while(!textures.empty()&&textureBytes+bytes>256*1024*1024){auto old=textures.begin();textureBytes-=old->second.bytes;textures.erase(old);}
+     Cached<ID3D11ShaderResourceView> entry;entry.source=source;entry.replacement=smallTexture(device.Get(),source);entry.bytes=bytes;
      found=textures.emplace(source,std::move(entry)).first;textureBytes+=bytes;
     }
    }
   }
-  if(found!=textures.end()&&found->second.replacement){replacement[slot]=found->second.replacement.Get();changed=true;}
+  if(found!=textures.end()&&found->second.replacement){retained[slot]=found->second.replacement;replacement[slot]=retained[slot].Get();changed=true;}
  }
  std::array<ID3D11SamplerState*,16> oldSamplers{},newSamplers{};
  if(changed){
@@ -192,7 +260,7 @@ void styledDraw(ID3D11DeviceContext* context,UINT count,UINT start,INT base,Subm
   if(++changedDraws==1)spdlog::info("Runtime style: first world draw styled (64px diffuse mips, point filtering)");
  }
  ComPtr<ID3D11Buffer> oldIndices;DXGI_FORMAT format{};UINT offset{};bool replacedMesh=false;
- if(pass.staticMesh&&!start&&!base&&count>=96){
+ if(meshReplacementEnabled&&pass.staticMesh&&!start&&!base&&count>=96){
   D3D11_PRIMITIVE_TOPOLOGY topology{};context->IAGetPrimitiveTopology(&topology);
   if(topology==D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST){
    context->IAGetIndexBuffer(&oldIndices,&format,&offset);
@@ -263,8 +331,19 @@ void install(){
  }
  REL::Relocation<std::uintptr_t> lighting{RE::VTABLE_BSLightingShader[0]};
  originalSetup=lighting.write_vfunc(6,setup);originalRestore=lighting.write_vfunc(7,restore);
- spdlog::info("Runtime style hooks installed at 3 verified triangle submission sites; F6 toggles while F8 is active.");
+ auto hookExtra=[]<unsigned Index>(REL::VariantID id){
+  REL::Relocation<std::uintptr_t> table{id};extraSetup[Index]=table.write_vfunc(6,setupExtra<Index>);extraRestore[Index]=table.write_vfunc(7,restoreExtra<Index>);
+ };
+ hookExtra.operator()<0>(RE::VTABLE_BSGrassShader[0]);
+ hookExtra.operator()<1>(RE::VTABLE_BSDistantTreeShader[0]);
+ hookExtra.operator()<2>(RE::VTABLE_BSEffectShader[0]);
+ spdlog::info("Runtime style hooks installed at 3 verified triangle submission sites; F6 toggles while F8 is active. Mesh replacement disabled pending corruption investigation.");
 }
 void setGameplay(bool active){gameplay.store(active,std::memory_order_relaxed);}
+void updateRoofView(bool active,scape::Vec focus,scape::Vec camera,bool interior){
+ std::lock_guard lock(roofMutex);roofViewActive=active;roofInterior=interior;roofFocus=focus;roofCamera=camera;
+}
+void toggleRoofs(){bool value=!roofsEnabled.load();roofsEnabled.store(value);spdlog::info("ROOF camera hiding {}",value?"on":"off");}
+
 void toggle(){bool value=!enabled.load();enabled.store(value);spdlog::info("Runtime Old School style {}",value?"on":"off");}
 }

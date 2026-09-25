@@ -3,6 +3,7 @@
 #include <spdlog/sinks/basic_file_sink.h>
 #include <chrono>
 #include <mutex>
+#include <atomic>
 #include "control_math.hpp"
 #include "native_navigation.hpp"
 #include "terrain_overlay.hpp"
@@ -13,12 +14,33 @@
 #include "runtime_style.hpp"
 namespace {
 using Clock=std::chrono::steady_clock;
+std::atomic_bool loadingScene{};
+std::atomic_bool sceneVisualsReady{};
+std::atomic_uint64_t sceneEpoch{};
+std::atomic<std::int64_t> sceneQuietUntil{};
+void suspendScene(unsigned milliseconds){
+ sceneVisualsReady.store(false);sceneEpoch.fetch_add(1);
+ runtime_style::updateRoofView(false,{},{});
+ sceneQuietUntil.store(std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now().time_since_epoch()).count()+milliseconds);
+ runtime_style::setGameplay(false);
+}
+class LoadingMenus final:public RE::BSTEventSink<RE::MenuOpenCloseEvent>{
+ RE::BSEventNotifyControl ProcessEvent(const RE::MenuOpenCloseEvent* event,RE::BSTEventSource<RE::MenuOpenCloseEvent>*)override{
+  if(event&&event->menuName=="Loading Menu"){
+   loadingScene.store(event->opening);suspendScene(event->opening?2000:500);
+   spdlog::info("SCENE loading menu {}",event->opening?"opened":"closed");
+  }
+  return RE::BSEventNotifyControl::kContinue;
+ }
+}loadingMenus;
 scape::Vec vec(RE::NiPoint3 p){return {p.x,p.y,p.z};}
 RE::NiPoint3 point(scape::Vec p){return {p.x,p.y,p.z};}
 enum class Order{none,walk,interact,attack};
 struct State{
  bool enabled{},middle{},ownsMovement{},attackHeld{};
- bool blockHeld{},powerHeld{};unsigned lightAttacks{};
+ float lastCombatRange{};RE::FormID lastCombatWeapon{};
+ bool surfaceInteraction{};scape::Vec interactionPoint{};
+ bool blockHeld{},powerHeld{},attackAwaiting{},requestedPower{};unsigned lightAttacks{};
  Clock::time_point attackStarted{},attackRelease{},blockStarted{},blockUntil{},nextPower{},nextBlock{};
  scape::combat::Motion targetMotion;RE::FormID motionTarget{};
  Clock::time_point reactedHit{},evadeUntil{},nextEvade{},nextEvadeCheck{};
@@ -52,11 +74,18 @@ struct State{
 // Hit notifications may arrive on another thread. Only the input tick decides
 // movement/target changes; the event callback records evidence, not controls.
 struct CombatHit {RE::ObjectRefHandle source;Clock::time_point when{};};
-std::mutex combatHitMutex;CombatHit combatHit;
+std::mutex combatHitMutex;CombatHit combatHit,arrowHit;
+struct RangedResponse {
+ RE::ObjectRefHandle shooter;Clock::time_point evidence{},nextDecision{},nextSample{},until{},nextCheck{};
+ scape::Vec origin{},cover{};unsigned candidate{};bool searching{},moving{},holding{};
+}ranged;
 class CombatHits final:public RE::BSTEventSink<RE::TESHitEvent>{
  RE::BSEventNotifyControl ProcessEvent(const RE::TESHitEvent* event,RE::BSTEventSource<RE::TESHitEvent>*)override{
   if(event&&event->target.get()==RE::PlayerCharacter::GetSingleton()&&event->cause&&event->cause->As<RE::Actor>()){
-   std::lock_guard lock(combatHitMutex);combatHit={event->cause->CreateRefHandle(),Clock::now()};
+   auto weapon=RE::TESForm::LookupByID<RE::TESObjectWEAP>(event->source);
+   if(!weapon){auto equipped=event->cause->As<RE::Actor>()->GetEquippedObject(false);weapon=equipped?equipped->As<RE::TESObjectWEAP>():nullptr;}
+   bool arrow=event->projectile&&weapon&&(weapon->IsBow()||weapon->IsCrossbow());
+   std::lock_guard lock(combatHitMutex);combatHit={event->cause->CreateRefHandle(),Clock::now()};if(arrow)arrowHit=combatHit;
   }
   return RE::BSEventNotifyControl::kContinue;
  }
@@ -64,6 +93,7 @@ class CombatHits final:public RE::BSTEventSink<RE::TESHitEvent>{
 struct ContextMenu{
  bool open{};std::uint32_t revision{};scape::menu::Layout layout;
  std::string title;std::vector<scape::menu::Row> rows;RE::ObjectRefHandle target;
+ std::unordered_map<RE::FormID,scape::Vec> surfaces;
  scape::Vec ground;RE::FormID world{},cell{};
 }contextMenu,displayedMenu;
 struct Display{bool enabled{};float x{.5f},y{.5f};bool overlay{};}display;
@@ -74,11 +104,15 @@ struct ClickFeedback{float x{},y{};bool action{};Clock::time_point when{};}click
 std::mutex displayMutex;
 void rejectedClick(){std::lock_guard lock(displayMutex);clickFeedback={state.cursorX,state.cursorY,true,Clock::now()};}
 bool gameplay(){
- auto ui=RE::UI::GetSingleton();auto p=RE::PlayerCharacter::GetSingleton();
- auto controls=RE::ControlMap::GetSingleton();auto camera=RE::PlayerCamera::GetSingleton();
- if(!ui||!p||!controls||!camera||!p->Get3D()||p->IsDead()||ui->GameIsPaused())return false;
- if(!controls->IsMovementControlsEnabled()||p->GetSitSleepState()!=RE::SIT_SLEEP_STATE::kNormal)return false;
+ if(loadingScene.load()||std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now().time_since_epoch()).count()<sceneQuietUntil.load())return false;
+ // Reject front-end/loading/creation menus before inspecting player scene data.
+ auto ui=RE::UI::GetSingleton();
+ if(!ui||ui->GameIsPaused())return false;
  for(auto name:{"Dialogue Menu","InventoryMenu","MagicMenu","ContainerMenu","BarterMenu","Crafting Menu","MapMenu","Console","TweenMenu","Main Menu","Loading Menu","RaceSex Menu","Book Menu","Lockpicking Menu"})if(ui->IsMenuOpen(name))return false;
+ auto p=RE::PlayerCharacter::GetSingleton();
+ auto controls=RE::ControlMap::GetSingleton();auto camera=RE::PlayerCamera::GetSingleton();
+ if(!p||!controls||!camera||!p->Get3D()||!p->GetParentCell()||!p->GetParentCell()->IsAttached()||p->IsDead())return false;
+ if(!controls->IsMovementControlsEnabled()||p->GetSitSleepState()!=RE::SIT_SLEEP_STATE::kNormal)return false;
  return camera->IsInThirdPerson()||camera->IsInFirstPerson();
 }
 void attackButton(RE::PlayerControls* controls,bool down,float held=0.f){
@@ -97,11 +131,12 @@ void cancel(RE::PlayerControls* c){
  native_navigation::gridCache().grid.abandon();state.planning=false;
  if(state.attackHeld)attackButton(c,false);
  if(state.blockHeld)blockButton(c,false);
- state.powerHeld=false;state.blockUntil={};
- state.targetMotion={};state.motionTarget=0;state.evadeUntil={};state.reactedHit=Clock::now();state.nextEvade={};state.nextPrediction={};
+ state.powerHeld=false;state.attackAwaiting=false;state.blockUntil={};
+ ranged={};
+ state.targetMotion={};state.motionTarget=0;state.lastCombatRange=0;state.lastCombatWeapon=0;state.evadeUntil={};state.reactedHit=Clock::now();state.nextEvade={};state.nextPrediction={};
  if(c&&state.ownsMovement){c->data.moveInputVec={0,0};c->data.prevMoveVec={0,0};state.ownsMovement=false;}
  if(c&&state.runningOwned){c->data.running=state.savedRunning;state.runningOwned=false;}
- state.order=Order::none;state.target={};
+ state.order=Order::none;state.target={};state.surfaceInteraction=false;
  state.talkOnly=false;
  state.route.clear();state.waypoint=0;
  state.traversal.clear();state.activeTraversal=(std::numeric_limits<std::size_t>::max)();
@@ -119,7 +154,11 @@ Hit cast(RE::NiPoint3 start,RE::NiPoint3 end,bool logIgnored=false,bool groundOn
  auto ignored=[p](RE::TESObjectREFR* ref){
   // Skyrim.esm 0002F245 is FXcameraAttachEffectsACT. Its invisible volume
   // was intercepting dozens of unrelated clicks and also clearance rays.
-  return ref&&(ref==p||(ref->GetBaseObject()&&ref->GetBaseObject()->GetFormID()==0x0002F245));
+  // Skyrim.esm 00033F50 is defaultSetStageTRIG; Whiterun reference
+  // 000C07F0 (C02KickerTrigger1) is an invisible quest volume, not a door.
+  // 00092A6A is WhiterunBraithLarsFightTrigger, another invisible scene box.
+  // Filtering queries does not disable their native trigger/quest events.
+  return ref&&(ref==p||(ref->GetBaseObject()&&(ref->GetBaseObject()->GetFormID()==0x0002F245||ref->GetBaseObject()->GetFormID()==0x00033F50||ref->GetBaseObject()->GetFormID()==0x00092A6A)));
  };
  auto firstRef=RE::TESHavokUtilities::FindCollidableRef(*pick.rayOutput.rootCollidable);
  if(ignored(firstRef)||groundOnly){
@@ -127,7 +166,8 @@ Hit cast(RE::NiPoint3 start,RE::NiPoint3 end,bool logIgnored=false,bool groundOn
   const RE::hkpWorldRayCastOutput* nearest=nullptr;
   for(const auto& hit:collector.hits){
    if(!hit.HasHit()||!hit.rootCollidable)continue;
-   if(ignored(RE::TESHavokUtilities::FindCollidableRef(*hit.rootCollidable)))continue;
+   auto ref=RE::TESHavokUtilities::FindCollidableRef(*hit.rootCollidable);
+   if(ignored(ref))continue;
    if(groundOnly){auto ref=RE::TESHavokUtilities::FindCollidableRef(*hit.rootCollidable);if(ref&&ref->As<RE::Actor>())continue;alignas(16) float n[4];_mm_store_ps(n,hit.normal.quad);if(n[2]<.55f)continue;}
    if(!nearest||hit.hitFraction<nearest->hitFraction)nearest=&hit;
   }
@@ -180,15 +220,23 @@ RE::NiCamera* findCamera(RE::NiAVObject* o){
  if(auto n=o->AsNode())for(auto& child:n->GetChildren())if(auto c=findCamera(child.get()))return c;
  return nullptr;
 }
+scape::combat::MeleeRange combatRange(RE::Actor* actor){
+ if(!actor)return scape::combat::meleeRange(64.f);
+ auto equipped=actor->GetEquippedObject(false);auto weapon=equipped?equipped->As<RE::TESObjectWEAP>():nullptr;
+ // Preserve the existing non-melee behavior; bow/magic tactics are separate.
+ if(weapon&&!weapon->IsMelee())return {110.f,80.f};
+ return scape::combat::meleeRange(actor->GetAttackReach());
+}
 bool planRoute(scape::Vec position){
  auto started=Clock::now();
  if(!state.planning){state.planStarted=started;state.planSlices=0;state.maxPlanSliceMs=0;state.planOrigin=position;state.planGoal=state.destination;}
  auto goalVisible=[](scape::Vec approach){
   auto target=state.target.get();if(!target)return false;
-  auto hit=cast(point(approach+scape::Vec{0,0,60}),point(state.planGoal+scape::Vec{0,0,60}));
+  if(state.order==Order::attack&&!scape::combat::inMeleeRange(approach,state.planGoal,combatRange(RE::PlayerCharacter::GetSingleton()).strike))return false;
+  auto hit=cast(point(approach+scape::Vec{0,0,60}),point(state.surfaceInteraction?state.interactionPoint:state.planGoal+scape::Vec{0,0,60}));
   return !hit.valid||hit.reference==target.get();
  };
- auto result=native_navigation::plan(state.planOrigin,state.planGoal,state.order==Order::walk,clearTraversal,goalVisible);
+ auto result=native_navigation::plan(state.planOrigin,state.planGoal,state.order==Order::walk,clearTraversal,goalVisible,state.surfaceInteraction?24.f:state.order==Order::attack?combatRange(RE::PlayerCharacter::GetSingleton()).approach:80.f);
  ++state.planSlices;auto elapsed=std::chrono::duration<double,std::milli>(Clock::now()-started).count();state.maxPlanSliceMs=(std::max)(state.maxPlanSliceMs,elapsed);
  if(elapsed>12)spdlog::info("PLAN slow slice {:.2f} ms expanded={} pending={}",elapsed,result.stats.expanded,result.pending);
  state.planning=result.pending;state.nextPlan=Clock::now()+std::chrono::milliseconds(result.pending?0:state.order==Order::attack?200:750);
@@ -203,9 +251,17 @@ bool planRoute(scape::Vec position){
  for(std::size_t i=0;i<state.route.size();++i){auto p=state.route[i];spdlog::info("ROUTE point {} type={} position {:.2f} {:.2f} {:.2f}",i,static_cast<int>(state.traversal[i]),p.x,p.y,p.z);}
  return true;
 }
-float orderRange(){return state.order==Order::walk?24.f:state.order==Order::attack?110.f:130.f;}
+float orderRange(){return state.order==Order::walk?24.f:state.order==Order::attack?combatRange(RE::PlayerCharacter::GetSingleton()).strike:130.f;}
 bool actionInReach(RE::PlayerCharacter* player,RE::TESObjectREFR* target){
- if(!target||!scape::reached(vec(player->GetPosition()),vec(target->GetPosition()),orderRange()))return false;
+ if(!target)return false;
+ if(state.surfaceInteraction&&state.order==Order::interact){
+  auto position=vec(player->GetPosition());
+  if(!scape::reached(position,state.destination,48.f)||std::abs(position.z-state.destination.z)>64.f)return false;
+  auto hit=cast(point(position+scape::Vec{0,0,60}),point(state.interactionPoint));
+  return !hit.valid||hit.reference==target;
+ }
+ if(state.order==Order::attack){if(!scape::combat::inMeleeRange(vec(player->GetPosition()),vec(target->GetPosition()),orderRange()))return false;}
+ else if(!scape::reached(vec(player->GetPosition()),vec(target->GetPosition()),orderRange()))return false;
  bool unused=false;return player->HasLineOfSight(target,unused);
 }
 void issueHit(Hit hit,std::optional<Order> forced={}){
@@ -223,6 +279,19 @@ void issueHit(Hit hit,std::optional<Order> forced={}){
   if(actor&&!actor->IsDead()&&actor->IsHostileToActor(p))state.order=Order::attack;
   else if(actor||type==RE::FormType::Door||type==RE::FormType::Container||type==RE::FormType::Activator||type==RE::FormType::Furniture||hit.reference->GetBaseObject()->IsInventoryObject())state.order=Order::interact;
   if(state.order!=Order::walk){state.target=hit.reference->GetHandle();state.destination=vec(hit.reference->GetPosition());}
+ }
+ if(state.order==Order::interact&&hit.reference&&!hit.reference->As<RE::Actor>()){
+  state.surfaceInteraction=true;state.interactionPoint=hit.position;
+  auto feet=vec(p->GetPosition());
+  // Pick at body height for tall doors, not at their distant pivot or lintel.
+  state.interactionPoint.z=std::clamp(hit.position.z,feet.z+30.f,feet.z+100.f);
+  auto towardPlayer=feet-hit.position;towardPlayer.z=0;auto distance=towardPlayer.length();
+  auto approach=hit.position;if(distance>1)approach=approach+towardPlayer*(48.f/distance);
+  approach.z=feet.z;
+  auto floor=scape::nav::surface(native_navigation::refreshGrid().mesh,approach,96.f,256.f,96.f);
+  if(!floor){spdlog::info("INTERACT no approach surface target={:08X} picked={:.1f},{:.1f},{:.1f}",hit.reference->GetFormID(),hit.position.x,hit.position.y,hit.position.z);rejectedClick();cancel(RE::PlayerControls::GetSingleton());return;}
+  state.destination=floor->point;
+  spdlog::info("INTERACT surface target={:08X} approach={:.1f},{:.1f},{:.1f} pivotDistance={:.1f}",hit.reference->GetFormID(),state.destination.x,state.destination.y,state.destination.z,scape::planarDistance(hit.position,vec(hit.reference->GetPosition())));
  }
  state.lastPosition=vec(p->GetPosition());state.lastProgress=Clock::now();state.nextAttack={};
  if(state.order==Order::walk||!actionInReach(p,hit.reference)){
@@ -257,6 +326,30 @@ void click(){
  issueHit(hit);
 }
 
+std::vector<Hit> doorsUnderCursor(RE::NiPoint3 start,RE::NiPoint3 end){
+ std::vector<Hit> doors;
+ auto player=RE::PlayerCharacter::GetSingleton();auto cell=player?player->GetParentCell():nullptr;auto world=cell?cell->GetbhkWorld():nullptr;
+ if(!world)return doors;
+ RE::hkpAllRayHitCollector collector;RE::bhkPickData pick{};float scale=RE::bhkWorld::GetWorldScale();
+ pick.rayInput.from=RE::hkVector4(start*scale);pick.rayInput.to=RE::hkVector4(end*scale);
+ pick.rayInput.filterInfo.filter=static_cast<std::uint32_t>(RE::COL_LAYER::kLOS);
+ if(auto controller=player->GetCharController())pick.rayInput.filterInfo.SetSystemGroup(controller->collisionFilterGroup);
+ pick.allRayHitCollector=&collector;
+ RE::BSReadLockGuard lock(world->worldLock);world->PickObject(pick);
+ for(const auto& hit:collector.hits){
+  if(!hit.HasHit()||!hit.rootCollidable)continue;
+  auto ref=RE::TESHavokUtilities::FindCollidableRef(*hit.rootCollidable);auto base=ref?ref->GetBaseObject():nullptr;
+  if(!base||base->GetFormType()!=RE::FormType::Door||!ref->Get3D())continue;
+  if(ref->GetWorldspace()!=player->GetWorldspace()||(!player->GetWorldspace()&&ref->GetParentCell()!=cell))continue;
+  auto position=vec(start+(end-start)*hit.hitFraction);
+  auto existing=std::find_if(doors.begin(),doors.end(),[&](const Hit& door){return door.reference==ref;});
+  if(existing==doors.end())doors.push_back({true,position,ref,1.f});
+  else if((position-vec(start)).length()<(existing->position-vec(start)).length())existing->position=position;
+ }
+ std::sort(doors.begin(),doors.end(),[&](const Hit& a,const Hit& b){return (a.position-vec(start)).length()<(b.position-vec(start)).length();});
+ return doors;
+}
+
 void openContextMenu(){
  if(contextMenu.open){contextMenu.open=false;return;}
  auto pc=RE::PlayerCamera::GetSingleton();auto camera=pc?findCamera(pc->cameraRoot.get()):nullptr;if(!camera)return;
@@ -265,14 +358,23 @@ void openContextMenu(){
  ContextMenu menu;menu.revision=contextMenu.revision+1;menu.title="Choose action";menu.open=true;
  auto player=RE::PlayerCharacter::GetSingleton();menu.world=player->GetWorldspace()?player->GetWorldspace()->GetFormID():0;menu.cell=player->GetParentCell()?player->GetParentCell()->GetFormID():0;
  if(hit.valid&&hit.reference&&hit.reference!=player&&hit.reference->GetBaseObject()){
-  auto ref=hit.reference;menu.target=ref->GetHandle();auto type=ref->GetBaseObject()->GetFormType();
+  auto ref=hit.reference;menu.target=ref->GetHandle();menu.surfaces[ref->GetFormID()]=hit.position;auto type=ref->GetBaseObject()->GetFormType();
   if(auto name=ref->GetDisplayFullName();name&&*name){menu.title=name;if(menu.title.size()>32)menu.title=menu.title.substr(0,29)+"...";}
   if(auto actor=ref->As<RE::Actor>())menu.rows=scape::menu::actorRows(actor->IsDead(),actor->IsHostileToActor(player),actor->CanTalkToPlayer());
-  else if(type==RE::FormType::Door||type==RE::FormType::Container)menu.rows.push_back({scape::menu::Action::activate,"Open"});
+  else if(type==RE::FormType::Container)menu.rows.push_back({scape::menu::Action::activate,"Open"});
   else if(ref->GetBaseObject()->IsInventoryObject())menu.rows.push_back({scape::menu::Action::activate,"Take"});
   else if(type==RE::FormType::Furniture)menu.rows.push_back({scape::menu::Action::activate,"Use"});
   else if(type==RE::FormType::Activator)menu.rows.push_back({scape::menu::Action::activate,"Activate"});
  }
+ auto doors=doorsUnderCursor(start,start+direction*12000.f);
+ for(const auto& door:doors){
+  menu.surfaces[door.reference->GetFormID()]=door.position;
+  auto name=door.reference->GetDisplayFullName();std::string label="Open ";label+=name&&*name?name:"Door";
+  // Depth order distinguishes doors with identical display names.
+  if(std::count_if(doors.begin(),doors.end(),[&](const Hit& other){auto n=other.reference->GetDisplayFullName();return std::string_view(n?n:"")==std::string_view(name?name:"");})>1)label+=fmt::format(" ({})",1+static_cast<std::size_t>(&door-doors.data()));
+  menu.rows.push_back({scape::menu::Action::activate,label,door.reference->GetFormID()});
+ }
+ spdlog::info("CONTEXT ray found {} distinct doors",doors.size());
  if(ground.valid){auto floor=scape::nav::surface(native_navigation::refreshGrid().mesh,ground.position,48.f,64.f,40.f);
   if(floor){menu.ground=floor->point;menu.rows.push_back({scape::menu::Action::walk,"Walk here"});}
  }
@@ -289,12 +391,14 @@ void selectContextMenu(){
  auto player=RE::PlayerCharacter::GetSingleton();auto world=player->GetWorldspace();auto cell=player->GetParentCell();
  if((world?world->GetFormID():0)!=menu.world||(!world&&(!cell||cell->GetFormID()!=menu.cell))){rejectedClick();return;}
  if(row.action==scape::menu::Action::walk){issueHit({true,menu.ground,nullptr,1.f},Order::walk);return;}
- auto target=menu.target.get();if(!target||!target->Get3D()||target->GetWorldspace()!=world||(!world&&target->GetParentCell()!=cell)){rejectedClick();return;}
+ RE::NiPointer<RE::TESObjectREFR> target{row.target?RE::TESForm::LookupByID<RE::TESObjectREFR>(row.target):menu.target.get().get()};if(!target||!target->Get3D()||target->GetWorldspace()!=world||(!world&&target->GetParentCell()!=cell)){rejectedClick();return;}
+ if(row.target&&(!target->GetBaseObject()||target->GetBaseObject()->GetFormType()!=RE::FormType::Door)){rejectedClick();return;}
  auto actor=target->As<RE::Actor>();
  if(row.action==scape::menu::Action::attack&&(!actor||actor->IsDead())){rejectedClick();return;}
  if(row.action==scape::menu::Action::talk&&(!actor||actor->IsDead()||actor->IsHostileToActor(player)||!actor->CanTalkToPlayer())){rejectedClick();return;}
  spdlog::info("CONTEXT selected {} target={:08X}",row.label,target->GetFormID());
- issueHit({true,vec(target->GetPosition()),target.get(),1.f},row.action==scape::menu::Action::attack?Order::attack:Order::interact);
+ auto picked=menu.surfaces.find(target->GetFormID());
+ issueHit({true,picked!=menu.surfaces.end()?picked->second:vec(target->GetPosition()),target.get(),1.f},row.action==scape::menu::Action::attack?Order::attack:Order::interact);
  state.talkOnly=row.action==scape::menu::Action::talk;
 }
 bool followTraversal(RE::PlayerControls* controls,scape::Vec position){
@@ -324,23 +428,110 @@ bool followTraversal(RE::PlayerControls* controls,scape::Vec position){
  if(now-state.traversalStarted>std::chrono::seconds(3)){spdlog::info("Traversal cancelled: landing timeout");cancel(controls);return false;}
  return true;
 }
+bool protectedFrom(scape::Vec cover,RE::Actor* shooter){
+ auto source=vec(shooter->GetPosition())+scape::Vec{0,0,100};
+ // Both torso and head, with lateral clearance; an actor or loose object is
+ // not durable cover. Null references can represent landscape collision.
+ auto side=cover-source;side.z=0;float length=side.length();if(length<1)return false;
+ side=scape::Vec{-side.y/length*16,side.x/length*16,0};
+ for(float height:{55.f,115.f})for(float sign:{-1.f,1.f}){
+  auto start=cover+scape::Vec{0,0,height}+side*sign;
+  auto hit=cast(point(start),point(source));
+  if(!hit.valid||scape::planarDistance(hit.position,source)<40)return false;
+  if(hit.reference){
+   auto base=hit.reference->GetBaseObject();if(!base)return false;auto type=base->GetFormType();
+   if(type!=RE::FormType::Static&&type!=RE::FormType::Tree&&type!=RE::FormType::MovableStatic)return false;
+  }
+ }
+ return true;
+}
+bool respondToArrows(RE::PlayerControls* c,RE::PlayerCharacter* p){
+ auto now=Clock::now();CombatHit hit;{std::lock_guard lock(combatHitMutex);hit=arrowHit;}
+ if(hit.when>ranged.evidence&&hit.when>state.reactedHit){ranged.shooter=hit.source;ranged.evidence=hit.when;}
+ if(ranged.evidence==Clock::time_point{}||now-ranged.evidence>std::chrono::seconds(8)){ranged={};return false;}
+ auto reference=ranged.shooter.get();auto shooter=reference?reference->As<RE::Actor>():nullptr;
+ if(!shooter||shooter->IsDead()||!shooter->Get3D()||!shooter->IsHostileToActor(p)||shooter->GetWorldspace()!=p->GetWorldspace()||
+  (!p->GetWorldspace()&&shooter->GetParentCell()!=p->GetParentCell())){ranged={};return false;}
+ if(state.activeTraversal!=(std::numeric_limits<std::size_t>::max)()||p->IsInJumpState()||p->IsStaggered()||state.attackHeld||p->GetAttackState()!=RE::ATTACK_STATE_ENUM::kNone)return false;
+ auto position=vec(p->GetPosition());auto target=state.target.get();
+ if(!target)return false;
+ float shooterDistance=scape::planarDistance(position,vec(shooter->GetPosition()));
+ auto fraction=[&](RE::ActorValue value){return p->GetActorValue(value)/(std::max)(1.f,p->GetPermanentActorValue(value));};
+ auto choice=scape::combat::rangedChoice(shooterDistance,scape::planarDistance(position,vec(target->GetPosition())),fraction(RE::ActorValue::kHealth),fraction(RE::ActorValue::kStamina));
+ auto clearRoute=[&]{native_navigation::gridCache().grid.abandon();state.planning=false;state.route.clear();state.traversal.clear();state.waypoint=0;state.nextPlan={};};
+ auto chase=[&]{
+  ranged.searching=ranged.moving=ranged.holding=false;ranged.nextDecision=now+std::chrono::seconds(3);
+  if(state.target!=ranged.shooter&&shooterDistance<2200){
+   clearRoute();state.target=ranged.shooter;state.destination=vec(shooter->GetPosition());state.targetMotion={};state.motionTarget=0;state.lastCombatRange=0;state.lastCombatWeapon=0;state.nextPrediction={};state.lightAttacks=0;
+   spdlog::info("RANGED choose shooter {:08X} distance={:.0f}",shooter->GetFormID(),shooterDistance);
+  }
+ };
+ if(ranged.moving||ranged.holding){
+  if(now>=ranged.until){ranged.moving=ranged.holding=false;ranged.nextDecision=now+std::chrono::seconds(2);return false;}
+  if(now>=ranged.nextCheck){
+   ranged.nextCheck=now+std::chrono::milliseconds(150);
+   if(!protectedFrom(ranged.cover,shooter)||!native_navigation::gridCache().grid.canWalk(position,ranged.cover,clearTraversal)){
+    ranged.moving=ranged.holding=false;ranged.nextDecision=now+std::chrono::milliseconds(400);spdlog::info("RANGED cover invalidated; reassess");return false;
+   }
+  }
+  if(state.blockHeld)blockButton(c,false);
+  if(scape::planarDistance(position,ranged.cover)<20){
+   if(!ranged.holding){ranged.holding=true;ranged.until=now+std::chrono::milliseconds(fraction(RE::ActorValue::kHealth)<.5f?2500:1200);spdlog::info("RANGED reached cover from {:08X}",shooter->GetFormID());}
+   c->data.moveInputVec={0,0};c->data.prevMoveVec={0,0};state.ownsMovement=true;state.lastProgress=now;return true;
+  }
+  auto heading=scape::heading(position,ranged.cover);p->SetHeading(heading);RE::PlayerCamera::GetSingleton()->GetRuntimeData2().yaw=heading;
+  c->data.moveInputVec={0,1};c->data.prevMoveVec=c->data.moveInputVec;state.ownsMovement=true;state.lastProgress=now;
+  if(!state.runningOwned){state.savedRunning=c->data.running;state.runningOwned=true;}c->data.running=true;return true;
+ }
+ if(!ranged.searching){
+  if(now<ranged.nextDecision)return false;
+  ranged.nextDecision=now+std::chrono::seconds(2);
+  if(choice==scape::combat::RangedChoice::keepFighting)return false;
+  if(choice==scape::combat::RangedChoice::closeShooter){chase();return false;}
+  ranged.searching=true;ranged.origin=position;ranged.candidate=0;ranged.nextSample=now;
+ }
+ // One candidate per 50 ms, never a full radial search in the input tick.
+ if(now<ranged.nextSample)return false;ranged.nextSample=now+std::chrono::milliseconds(50);
+ unsigned sample=ranged.candidate++;float angle=(sample%8)*.785398163f;float radius=sample<8?96.f:192.f;
+ auto hint=ranged.origin+scape::Vec{std::sin(angle)*radius,std::cos(angle)*radius,0};
+ auto& grid=native_navigation::gridCache().grid;auto floor=grid.projectGround(hint,48);
+ if(floor&&protectedFrom(*floor,shooter)&&grid.canWalk(position,*floor,clearTraversal)){
+  clearRoute();ranged.cover=*floor;ranged.searching=false;ranged.moving=true;ranged.until=now+std::chrono::seconds(3);ranged.nextCheck=now;
+  spdlog::info("RANGED choose cover {:.1f} {:.1f} {:.1f} shooter={:08X}",floor->x,floor->y,floor->z,shooter->GetFormID());
+ }else if(ranged.candidate>=16){
+  ranged.searching=false;spdlog::info("RANGED no validated nearby cover");ranged.nextDecision=now+std::chrono::seconds(2);
+  if(choice!=scape::combat::RangedChoice::keepFighting&&fraction(RE::ActorValue::kHealth)>=.5f&&fraction(RE::ActorValue::kStamina)>=.25f)chase();
+ }
+ return false;
+}
 void tick(RE::PlayerControls* c){
  auto p=RE::PlayerCharacter::GetSingleton();auto cell=p->GetParentCell();
  const auto world=p->GetWorldspace();const auto worldID=world?world->GetFormID():0;
  // A streamed exterior-cell boundary is part of one journey. Interiors/world changes cancel it.
  if(!cell||worldID!=state.world||(!worldID&&cell->GetFormID()!=state.cell))cancel(c);
  state.cell=cell?cell->GetFormID():0;state.world=worldID;
+ if(state.attackAwaiting){
+  auto attackState=p->GetAttackState();
+  if(attackState!=RE::ATTACK_STATE_ENUM::kNone){
+   if(!state.requestedPower)++state.lightAttacks;
+   spdlog::info("ATTACK animation acknowledged power={} state={}",state.requestedPower,static_cast<int>(attackState));state.attackAwaiting=false;
+  }else if(Clock::now()-state.attackStarted>std::chrono::milliseconds(900)){
+   spdlog::info("ATTACK no animation acknowledged power={}; retry after input recovery",state.requestedPower);
+   state.attackAwaiting=false;state.nextAttack=Clock::now()+std::chrono::milliseconds(300);
+  }
+ }
  if(state.attackHeld){
   float held=std::chrono::duration<float>(Clock::now()-state.attackStarted).count();
-  if(!state.powerHeld||Clock::now()>=state.attackRelease){attackButton(c,false,held);state.powerHeld=false;}
+  if(Clock::now()>=state.attackRelease){attackButton(c,false,held);spdlog::info("ATTACK released power={} heldSeconds={:.3f}",state.powerHeld,held);state.powerHeld=false;}
   else attackButton(c,true,held);
  }
  if(state.order==Order::none)return;
+ if(state.order==Order::attack&&respondToArrows(c,p))return;
  auto now=Clock::now();auto position=vec(p->GetPosition());RE::NiPointer<RE::TESObjectREFR> target;
  if(state.order!=Order::walk){
   target=state.target.get();
   if(!target||!target->Get3D()||target->GetWorldspace()!=world||(!world&&target->GetParentCell()!=cell)){cancel(c);return;}
-  state.destination=vec(target->GetPosition());
+  if(!state.surfaceInteraction)state.destination=vec(target->GetPosition());
   if(state.talkOnly){auto actor=target->As<RE::Actor>();if(!actor||actor->IsDead()||actor->IsHostileToActor(p)||!actor->CanTalkToPlayer()){cancel(c);return;}}
   if(state.order==Order::attack){auto actor=target->As<RE::Actor>();if(!actor||actor->IsDead()){spdlog::info("Attack order ended: target is dead or no longer an actor");cancel(c);return;}}
  }
@@ -360,7 +551,7 @@ void tick(RE::PlayerControls* c){
      if(state.attackHeld){attackButton(c,false);state.powerHeld=false;}
      native_navigation::gridCache().grid.abandon();state.planning=false;state.route.clear();state.traversal.clear();state.waypoint=0;state.nextPlan={};
      state.target=other->CreateRefHandle();target=aggressor;actor=other;state.destination=vec(other->GetPosition());
-     state.targetMotion={};state.motionTarget=0;state.lightAttacks=0;
+     state.targetMotion={};state.motionTarget=0;state.lastCombatRange=0;state.lastCombatWeapon=0;state.lightAttacks=0;
      spdlog::info("COMBAT react: nearby attacker {:08X} takes priority over distant chase",other->GetFormID());
     }
    }
@@ -371,7 +562,14 @@ void tick(RE::PlayerControls* c){
   auto targetPosition=vec(actor->GetPosition());
   if(state.motionTarget!=actor->GetFormID()){state.targetMotion={};state.motionTarget=actor->GetFormID();state.nextPrediction={};}
   state.targetMotion.update(targetPosition,std::chrono::duration<double>(now.time_since_epoch()).count());
-  auto prediction=state.targetMotion.intercept(position,targetPosition);
+  auto range=combatRange(p);
+  auto equipped=p->GetEquippedObject(false);auto weaponID=equipped?equipped->GetFormID():0;
+  if(state.activeTraversal==(std::numeric_limits<std::size_t>::max)()&&(weaponID!=state.lastCombatWeapon||std::abs(range.strike-state.lastCombatRange)>1.f)){
+   state.lastCombatWeapon=weaponID;state.lastCombatRange=range.strike;
+   native_navigation::gridCache().grid.abandon();state.planning=false;state.route.clear();state.traversal.clear();state.waypoint=0;state.nextPlan={};
+   spdlog::info("COMBAT reach weapon={:08X} strike={:.1f} approach={:.1f}",weaponID,range.strike,range.approach);
+  }
+  auto prediction=state.targetMotion.intercept(position,targetPosition,range.strike);
   // A velocity estimate is not proof of walkable terrain. Reject predictions
   // crossing walls/ledges, and keep the real actor position for attack range.
   if(now>=state.nextPrediction){
@@ -380,13 +578,24 @@ void tick(RE::PlayerControls* c){
    auto& grid=native_navigation::gridCache().grid;
    if(auto floor=grid.projectGround(prediction,32);floor&&grid.canWalk(position,*floor,clearTraversal))state.combatAim=*floor;
    }
+   // Refresh short, walkable pursuit directly, including stair height profiles.
+   // Keep A* for corners/blocked approaches and preserve explicit traversals.
+   auto delta=position-state.combatAim;delta.z=0;float distance=delta.length();
+   if(distance>1&&distance<450&&!actionInReach(p,actor)&&state.activeTraversal==(std::numeric_limits<std::size_t>::max)()){
+    auto desired=state.combatAim+delta*((std::min)(range.approach,distance)/distance);
+    auto& grid=native_navigation::gridCache().grid;
+    if(auto floor=grid.projectGround(desired,64);floor&&scape::combat::inMeleeRange(*floor,targetPosition,range.strike)&&grid.canWalk(position,*floor,clearTraversal)){
+     grid.abandon();state.planning=false;state.route={position,*floor};state.traversal={scape::nav::Traversal::walk,scape::nav::Traversal::walk};state.waypoint=1;
+     state.plannedTarget=state.combatAim;state.nextPlan=now+std::chrono::milliseconds(200);
+    }
+   }
   }
   state.destination=state.combatAim;
   auto threatPosition=vec(threat->GetPosition());auto attack=threat->GetAttackState();
   float facing=std::remainder(threat->GetAngleZ()-scape::heading(threatPosition,position),6.2831853f);
   bool visible=false;
   incoming=(attack==RE::ATTACK_STATE_ENUM::kDraw||attack==RE::ATTACK_STATE_ENUM::kSwing||attack==RE::ATTACK_STATE_ENUM::kHit||attack==RE::ATTACK_STATE_ENUM::kBash)&&
-   scape::planarDistance(position,threatPosition)<200.f&&std::abs(position.z-threatPosition.z)<90.f&&std::abs(facing)<1.15f&&p->HasLineOfSight(threat,visible);
+   scape::planarDistance(position,threatPosition)<combatRange(threat).strike+24.f&&std::abs(position.z-threatPosition.z)<90.f&&std::abs(facing)<1.15f&&p->HasLineOfSight(threat,visible);
   auto left=p->GetEquippedObject(true),right=p->GetEquippedObject(false);
   auto weapon=right?right->As<RE::TESObjectWEAP>():nullptr;
   auto armor=left?left->As<RE::TESObjectARMO>():nullptr;
@@ -458,8 +667,8 @@ void tick(RE::PlayerControls* c){
   }
   while(state.waypoint<state.route.size()&&state.traversal[state.waypoint]==scape::nav::Traversal::walk){
    bool takeoff=state.waypoint+1<state.route.size()&&state.traversal[state.waypoint+1]!=scape::nav::Traversal::walk;
-   bool close=scape::reached(position,state.route[state.waypoint],18.f)&&(!takeoff||std::abs(position.z-state.route[state.waypoint].z)<=28.f);
-   bool passed=!takeoff&&state.waypoint>0&&state.waypoint+1<state.route.size()&&scape::passedWaypoint(position,state.route[state.waypoint-1],state.route[state.waypoint]);
+   bool close=scape::reached(position,state.route[state.waypoint],18.f)&&std::abs(position.z-state.route[state.waypoint].z)<=(takeoff?28.f:35.f);
+   bool passed=!takeoff&&std::abs(position.z-state.route[state.waypoint].z)<=35.f&&state.waypoint>0&&state.waypoint+1<state.route.size()&&scape::passedWaypoint(position,state.route[state.waypoint-1],state.route[state.waypoint]);
    if(!close&&!passed)break;++state.waypoint;
   }
   if(state.waypoint<state.route.size()&&state.traversal[state.waypoint]!=scape::nav::Traversal::walk&&!followTraversal(c,position))return;
@@ -510,24 +719,33 @@ void tick(RE::PlayerControls* c){
  if(state.runningOwned){c->data.running=state.savedRunning;state.runningOwned=false;}
  if(state.order!=Order::walk)p->SetHeading(scape::heading(position,state.destination));
  if(state.order==Order::walk){spdlog::info("Walk destination reached");cancel(c);return;}
- if(state.order==Order::interact){auto ref=target;cancel(c);const bool result=ref->ActivateRef(p,0,nullptr,1,false);spdlog::info("Activation target {:08X} returned {}",ref->GetFormID(),result);return;}
+ if(state.order==Order::interact){
+  auto ref=target;auto id=ref->GetFormID();bool door=ref->GetBaseObject()&&ref->GetBaseObject()->GetFormType()==RE::FormType::Door;cancel(c);
+  if(door){
+   suspendScene(2000);combat_text::update(false);
+   {std::lock_guard lock(displayMutex);terrainDisplay.reset();displayedRoute.clear();display.enabled=false;}
+   state.nextOverlay={};spdlog::info("SCENE suspend before door {:08X}",id);
+  }
+  const bool result=ref->ActivateRef(p,0,nullptr,1,false);spdlog::info("Activation target {:08X} returned {}",id,result);if(!result)rejectedClick();return;
+ }
  if(!RE::ControlMap::GetSingleton()->IsFightingControlsEnabled()){cancel(c);return;}
  if(!p->IsWeaponDrawn()){p->DrawWeaponMagicHands(true);return;}
- if(!incoming&&now>=state.nextAttack&&!state.attackHeld&&p->GetAttackState()==RE::ATTACK_STATE_ENUM::kNone&&!p->IsStaggered()){
+ if(!incoming&&now>=state.nextAttack&&!state.attackAwaiting&&!state.attackHeld&&p->GetAttackState()==RE::ATTACK_STATE_ENUM::kNone&&!p->IsStaggered()){
   auto actor=target->As<RE::Actor>();
   auto right=p->GetEquippedObject(false);auto weapon=right?right->As<RE::TESObjectWEAP>():nullptr;
   float stamina=p->GetActorValue(RE::ActorValue::kStamina),maximum=p->GetPermanentActorValue(RE::ActorValue::kStamina);
   bool power=scape::combat::shouldPower(incoming,weapon&&weapon->IsMelee(),now>=state.nextPower,state.lightAttacks,stamina,maximum);
-  spdlog::info("Melee input target {:08X}, range {:.1f}, target health {:.1f}",target->GetFormID(),scape::planarDistance(position,state.destination),actor?actor->GetActorValue(RE::ActorValue::kHealth):0.f);
-  state.attackStarted=now;state.powerHeld=power;
+  spdlog::info("Melee input target {:08X}, range {:.1f} allowed {:.1f}, target health {:.1f}",target->GetFormID(),scape::planarDistance(position,vec(target->GetPosition())),orderRange(),actor?actor->GetActorValue(RE::ActorValue::kHealth):0.f);
+  float delay=.5f;if(auto settings=RE::GameSettingCollection::GetSingleton())if(auto setting=settings->GetSetting("fPowerAttackDelay")){auto value=setting->GetFloat();if(std::isfinite(value)&&value>.1f&&value<2.f)delay=value;}
+  state.attackStarted=now;state.powerHeld=power;state.requestedPower=power;state.attackAwaiting=true;
   if(power){
-   float delay=.5f;if(auto settings=RE::GameSettingCollection::GetSingleton())if(auto setting=settings->GetSetting("fPowerAttackDelay")){auto value=setting->GetFloat();if(std::isfinite(value)&&value>.1f&&value<2.f)delay=value;}
    state.attackRelease=now+std::chrono::milliseconds(static_cast<int>((delay+.2f)*1000));state.nextPower=now+std::chrono::seconds(6);state.lightAttacks=0;
    spdlog::info("AUTO POWER target={:08X} stamina={:.1f} holdSeconds={:.2f}",actor->GetFormID(),stamina,delay+.2f);
-  }else ++state.lightAttacks;
-  // The native attack state gates the next swing; this short input debounce
-  // only prevents duplicate presses while the animation graph catches up.
-  attackButton(c,true);state.nextAttack=now+std::chrono::milliseconds(180);
+  }else state.attackRelease=now+std::chrono::milliseconds(static_cast<int>(scape::combat::lightHoldSeconds(delay)*1000));
+  // Feed a real press/held/release sequence. One-frame light taps were rejected
+  // while sustained power input worked. Acknowledgement prevents attempt spam
+  // from being mistaken for three completed light attacks.
+  attackButton(c,true);state.nextAttack=now+std::chrono::milliseconds(350);
  }
 }
 using InputFn=RE::BSEventNotifyControl(*)(RE::PlayerControls*,RE::InputEvent* const*,RE::BSTEventSource<RE::InputEvent*>*);
@@ -535,12 +753,16 @@ REL::Relocation<InputFn> originalInput;
 RE::BSEventNotifyControl input(RE::PlayerControls* c,RE::InputEvent* const* events,RE::BSTEventSource<RE::InputEvent*>* source){
  std::vector<std::pair<RE::InputEvent*,RE::InputEvent*>> links;
  RE::InputEvent* head=nullptr;RE::InputEvent** tail=&head;
+ const auto inputEpoch=sceneEpoch.load();
  bool active=state.enabled&&gameplay();
  // Build a temporary filtered list; restore every changed engine-owned link afterward.
  for(auto e=events?*events:nullptr;e;){
   auto next=e->next;bool consume=false;
   if(auto b=e->AsButtonEvent()){
    auto id=b->GetIDCode();
+   if(state.enabled&&e->GetDevice()==RE::INPUT_DEVICE::kKeyboard&&id==0x3F&&b->IsDown()){
+    runtime_style::toggleRoofs();consume=true;
+   }
    if(state.enabled&&e->GetDevice()==RE::INPUT_DEVICE::kKeyboard&&id==0x40&&b->IsDown()){
     runtime_style::toggle();consume=true;
    }
@@ -549,21 +771,30 @@ RE::BSEventNotifyControl input(RE::PlayerControls* c,RE::InputEvent* const* even
     spdlog::info("Terrain overlay {}",state.overlay?"on":"off");
    }
    if(e->GetDevice()==RE::INPUT_DEVICE::kKeyboard&&id==0x42&&b->IsDown()){
-    state.enabled=!state.enabled;cancel(c);state.middle=false;state.nextOverlay={};
-    if(state.enabled&&gameplay()){
-     auto player=RE::PlayerCharacter::GetSingleton();state.orbit.yaw=player->GetAngleZ();
-     state.cell=player->GetParentCell()?player->GetParentCell()->GetFormID():0;
-     state.world=player->GetWorldspace()?player->GetWorldspace()->GetFormID():0;
-     RE::PlayerCamera::GetSingleton()->ForceThirdPerson();
+    consume=true;
+    if(!state.enabled&&!gameplay()){
+     // Do not latch an enable request: the user must press F8 again once ready.
+     spdlog::info("F8 ignored: load a character and finish character creation before enabling SkyrimScape");
+    }else{
+     state.enabled=!state.enabled;cancel(c);state.middle=false;state.nextOverlay={};
+     if(state.enabled){
+      auto player=RE::PlayerCharacter::GetSingleton();state.orbit.yaw=player->GetAngleZ();
+      state.cell=player->GetParentCell()->GetFormID();
+      state.world=player->GetWorldspace()?player->GetWorldspace()->GetFormID():0;
+      RE::PlayerCamera::GetSingleton()->ForceThirdPerson();
+     }
+     spdlog::info(state.enabled?"SkyrimScape on":"SkyrimScape off");
     }
-    spdlog::info(state.enabled?"SkyrimScape on":"SkyrimScape off");consume=true;active=state.enabled&&gameplay();
+    active=state.enabled&&gameplay();
    }
    if(active&&e->GetDevice()==RE::INPUT_DEVICE::kMouse){
     consume=true;if(id==2){state.middle=b->IsPressed();if(state.middle)contextMenu.open=false;}
     if(b->IsDown()){if(id==0){if(contextMenu.open)selectContextMenu();else click();}if(id==1)openContextMenu();}
     if(auto steps=scape::wheelStep(id,b->Value());steps!=0){
+     if(contextMenu.open){contextMenu.layout.scroll(steps);++contextMenu.revision;}else{
      state.orbit.zoom(steps);
      spdlog::info("Mouse wheel {} -> camera distance {:.1f}",steps>0?"up/in":"down/out",state.orbit.distance);
+     }
     }
    }
    if(active&&e->GetDevice()==RE::INPUT_DEVICE::kKeyboard&&b->IsDown()){
@@ -584,9 +815,13 @@ RE::BSEventNotifyControl input(RE::PlayerControls* c,RE::InputEvent* const* even
  runtime_style::setGameplay(active);
  auto result=originalInput(c,&head,source);
  for(auto [e,next]:links)e->next=next;
+ active=sceneEpoch.load()==inputEpoch&&state.enabled&&gameplay();runtime_style::setGameplay(active);
  if(active){
   c->data.lookInputVec={0,0};tick(c);
-  if(state.overlay&&Clock::now()>=state.nextOverlay){
+  // Door activation can begin unloading the scene inside tick(). Never use
+  // the pre-activation gameplay result for navigation/HUD scene snapshots.
+  active=sceneEpoch.load()==inputEpoch&&state.enabled&&gameplay();runtime_style::setGameplay(active);
+  if(active&&state.overlay&&Clock::now()>=state.nextOverlay){
    auto started=Clock::now();
    auto terrain=std::make_shared<TerrainDisplay>();terrain->cells=native_navigation::refreshGrid().grid.supportedCells();
    spdlog::info("OVERLAY snapshot cells={} elapsedMs={:.2f}",terrain->cells.size(),std::chrono::duration<double,std::milli>(Clock::now()-started).count());
@@ -594,9 +829,12 @@ RE::BSEventNotifyControl input(RE::PlayerControls* c,RE::InputEvent* const* even
    state.nextOverlay=Clock::now()+std::chrono::seconds(2);
   }
  }
+ auto roofFocus=active?vec(RE::PlayerCharacter::GetSingleton()->GetPosition())+scape::Vec{0,0,75}:scape::Vec{};
+ runtime_style::updateRoofView(active,roofFocus,state.orbit.position(roofFocus),active&&RE::PlayerCharacter::GetSingleton()->GetParentCell()->IsInteriorCell());
  {std::lock_guard lock(displayMutex);display={active,state.cursorX,state.cursorY,state.overlay};displayedMenu=contextMenu;displayedRoute.clear();
   if(active&&state.order!=Order::none){displayedRoute.push_back(vec(RE::PlayerCharacter::GetSingleton()->GetPosition()));for(auto i=state.waypoint;i<state.route.size();++i)displayedRoute.push_back(state.route[i]);}
  }
+ sceneVisualsReady.store(active&&sceneEpoch.load()==inputEpoch);
  return result;
 }
 using RotationFn=void(*)(RE::ThirdPersonState*,RE::NiQuaternion&);
@@ -699,7 +937,7 @@ void drawContextMenu(RE::GFxValue& root,const ContextMenu& menu,const Display& c
  box(4,5,width,height,0,45);box(0,0,width,height,0x9C895B,100);box(1,1,width-2,height-2,0x141A20,97);
  box(1,1,width-2,header-2,0x222B34,100);box(10,header-2,width-20,1,0x9C895B,65);
  auto hover=menu.layout.hit(cursor.x,cursor.y);
- if(hover>=0){box(4,header+hover*rowHeight,width-8,rowHeight,0x3A4653,100);box(4,header+hover*rowHeight,3,rowHeight,0xEAC477,100);}
+ if(hover>=0){box(4,header+(hover-static_cast<int>(menu.layout.offset))*rowHeight,width-8,rowHeight,0x3A4653,100);box(4,header+(hover-static_cast<int>(menu.layout.offset))*rowHeight,3,rowHeight,0xEAC477,100);}
  RE::GFxValue oldRevision;bool rebuild=!panel.GetMember("revision",&oldRevision)||!oldRevision.IsNumber()||oldRevision.GetNumber()!=menu.revision;
  auto text=[&](const std::string& name,std::string label,int depth,double y,double color){
   RE::GFxValue field;bool created=!panel.GetMember(name.c_str(),&field)||!field.IsDisplayObject();
@@ -711,9 +949,9 @@ void drawContextMenu(RE::GFxValue& root,const ContextMenu& menu,const Display& c
   RE::GFxValue::DisplayInfo placement;placement.SetPosition(14,y);placement.SetVisible(true);field.SetDisplayInfo(placement);
  };
  text("title",menu.title,1,(header-24)*.5,0xEAC477);
- for(std::size_t i=0;i<8;++i){
+ for(std::size_t i=0;i<scape::menu::Layout::pageSize;++i){
   auto name="row"+std::to_string(i);
-  if(i<menu.rows.size()){auto& row=menu.rows[i];text(name,row.label,static_cast<int>(i+2),header+i*rowHeight+(rowHeight-24)*.5,row.action==scape::menu::Action::attack?0xFF8888:row.action==scape::menu::Action::walk?0xEAC477:0xE9EDF1);}
+  if(i<menu.layout.visibleRows()){auto& row=menu.rows[menu.layout.offset+i];text(name,row.label,static_cast<int>(i+2),header+i*rowHeight+(rowHeight-24)*.5,row.action==scape::menu::Action::attack?0xFF8888:row.action==scape::menu::Action::walk?0xEAC477:0xE9EDF1);}
   else{RE::GFxValue old;if(panel.GetMember(name.c_str(),&old)&&old.IsDisplayObject()){RE::GFxValue::DisplayInfo hidden;hidden.SetVisible(false);old.SetDisplayInfo(hidden);}}
  }
  panel.SetMember("revision",RE::GFxValue(static_cast<double>(menu.revision)));
@@ -721,6 +959,9 @@ void drawContextMenu(RE::GFxValue& root,const ContextMenu& menu,const Display& c
 void hud(RE::HUDMenu* self,float dt,std::uint32_t time){
  originalHud(self,dt,time);if(!self->uiMovie)return;
  Display data;ContextMenu menu;ClickFeedback feedback;std::shared_ptr<const TerrainDisplay> terrain;std::vector<scape::Vec> route;{std::lock_guard lock(displayMutex);data=display;menu=displayedMenu;feedback=clickFeedback;terrain=terrainDisplay;route=displayedRoute;}
+ // A loading event can occur without a subsequent input snapshot. Never use
+ // the previous display's enabled bit as permission to traverse scene nodes.
+ data.enabled=data.enabled&&sceneVisualsReady.load()&&!loadingScene.load();
  RE::GFxValue root,clip;if(!self->uiMovie->GetVariable(&root,"_root"))return;
  // Use the HUD's own enable method; save its setting on this movie so a
  // recreated HUD or a user-disabled crosshair is restored correctly.
@@ -733,7 +974,7 @@ void hud(RE::HUDMenu* self,float dt,std::uint32_t time){
   }else if(owned){const std::array<RE::GFxValue,1> args{saved};base.Invoke("SetCrosshairEnabled",args);base.SetMember("SkyrimScapeSavedCrosshair",RE::GFxValue());}
  }
  drawTerrain(root,data.enabled&&data.overlay,terrain,route,self->uiMovie->GetVisibleFrameRect());
- auto combatCamera=RE::PlayerCamera::GetSingleton();
+ auto combatCamera=data.enabled?RE::PlayerCamera::GetSingleton():nullptr;
  combat_text::draw(root,combatCamera?findCamera(combatCamera->cameraRoot.get()):nullptr,self->uiMovie->GetVisibleFrameRect(),data.enabled);
  drawContextMenu(root,menu,data,self->uiMovie->GetVisibleFrameRect());
  if(!root.GetMember("SkyrimScapePointer",&clip)||!clip.IsDisplayObject())if(!root.CreateEmptyMovieClip(&clip,"SkyrimScapePointer",17000))return;
@@ -763,6 +1004,7 @@ void hud(RE::HUDMenu* self,float dt,std::uint32_t time){
 }
 void message(SKSE::MessagingInterface::Message* e){
  if(e->type==SKSE::MessagingInterface::kDataLoaded){
+  RE::UI::GetSingleton()->AddEventSink<RE::MenuOpenCloseEvent>(&loadingMenus);
   runtime_style::install();
   RE::ScriptEventSourceHolder::GetSingleton()->AddEventSink<RE::TESHitEvent>(&combat_text::hits);
   RE::ScriptEventSourceHolder::GetSingleton()->AddEventSink<RE::TESHitEvent>(&combatHits);
@@ -772,7 +1014,7 @@ void message(SKSE::MessagingInterface::Message* e){
   REL::Relocation<std::uintptr_t> menu{RE::VTABLE_HUDMenu[0]};originalHud=menu.write_vfunc(5,hud);
   spdlog::info("Input, camera and HUD hooks installed; F8 enables prototype");
  }
- if(e->type==SKSE::MessagingInterface::kPreLoadGame||e->type==SKSE::MessagingInterface::kNewGame){runtime_style::setGameplay(false);combat_text::update(false);cancel(RE::PlayerControls::GetSingleton());state.enabled=false;state.middle=false;}
+ if(e->type==SKSE::MessagingInterface::kPreLoadGame||e->type==SKSE::MessagingInterface::kNewGame){suspendScene(2000);combat_text::update(false);cancel(RE::PlayerControls::GetSingleton());state.enabled=false;state.middle=false;}
 }
 }
 SKSEPluginLoad(const SKSE::LoadInterface* skse){
@@ -780,6 +1022,6 @@ SKSEPluginLoad(const SKSE::LoadInterface* skse){
  SKSE::Init(skse);auto directory=SKSE::log::log_directory();if(!directory)return false;
  auto log=spdlog::basic_logger_mt("SkyrimScape",(*directory/"SkyrimScape.log").string(),true);
  spdlog::set_default_logger(log);spdlog::flush_on(spdlog::level::info);
- spdlog::info("SkyrimScape experimental 0.3.15 loaded on {}",skse->RuntimeVersion().string());
+ spdlog::info("SkyrimScape experimental 0.3.29 loaded on {}",skse->RuntimeVersion().string());
  return SKSE::GetMessagingInterface()->RegisterListener(message);
 }

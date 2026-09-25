@@ -12,5 +12,13 @@ int main(){
  require(layout.x+layout.width<=.991f&&layout.y+layout.height()<=.991f,"Menu must fit at lower-right screen edge");
  for(int i=0;i<5;++i)require(layout.hit(layout.x+.02f,layout.y+layout.header+layout.rowHeight*(i+.5f))==i,"Each visual row must map to its own action");
  require(layout.hit(layout.x+.02f,layout.y+.01f)==-1&&layout.hit(layout.x-.01f,layout.y+.1f)==-1&&layout.hit(layout.x+.02f,layout.y+layout.height())==-1,"Header and outside clicks must dismiss without selecting an action");
+ Layout many;many.rows=30;many.place(.99f,.99f);
+ require(many.visibleRows()==12&&many.y+many.height()<=.991f,"Long door menus must fit on screen");
+ for(int i=0;i<40;++i)many.scroll(-1);
+ require(many.offset==18&&many.hit(many.x+.01f,many.y+many.header+many.rowHeight*11.5f)==29,"Scrolled last row must select the last actual door");
+ for(int i=0;i<40;++i)many.scroll(1);
+ require(many.offset==0,"Scrolling above first door must clamp");
+ Row a{Action::activate,"Open Door",123},b{Action::activate,"Open Door",456};
+ require(a.target!=b.target,"Identically named doors must preserve distinct targets");
  std::cout<<"PASS: contextual actions, viewport placement and menu hit testing\n";
 }

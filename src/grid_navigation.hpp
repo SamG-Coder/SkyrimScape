@@ -173,7 +173,21 @@ public:
    for(std::size_t n=0;n<(std::min)(candidates.size(),std::size_t{16});++n){auto i=candidates[n].second;if(canWalk(start,cells[i].position,validate)){from=i;break;}}
    if(!from){result.reason="start-to-grid-blocked";return result;}
   }
-  if(goalRadius==0&&!canWalk(cells[*to].position,finish,validate)){result.reason="grid-to-destination-blocked";return result;}
+  if(goalRadius==0&&!canWalk(cells[*to].position,finish,validate)){
+   // A stair edge/wall can block the nearest centre while a neighbouring
+   // centre still connects safely to the exact clicked destination.
+   std::vector<std::pair<float,std::size_t>> candidates;
+   auto x=coordinate(finish.x),y=coordinate(finish.y);
+   for(int dx=-2;dx<=2;++dx)for(int dy=-2;dy<=2;++dy){
+    auto column=columns.find(key(x+dx,y+dy));if(column==columns.end())continue;
+    for(auto i:column->second){auto p=cells[i].position;float h=planarDistance(finish,p),v=std::abs(finish.z-p.z);
+     if(i!=*to&&h<=48&&v<=80&&clearCell(i))candidates.emplace_back(h+v*2,i);
+    }
+   }
+   std::sort(candidates.begin(),candidates.end());to.reset();
+   for(std::size_t n=0;n<(std::min)(candidates.size(),std::size_t{16});++n){auto i=candidates[n].second;if(canWalk(cells[i].position,finish,validate)){to=i;break;}}
+   if(!to){result.reason="grid-to-destination-blocked";return result;}
+  }
   search.emplace();auto& s=*search;s.start=start;s.finish=finish;s.goalRadius=goalRadius;s.from=*from;s.to=to.value_or(cells.size());
   s.cost.assign(cells.size(),std::numeric_limits<float>::infinity());s.parent.assign(cells.size(),cells.size());s.actions.resize(cells.size());
   s.cost[*from]=0;s.queue.push({0,0,*from});
