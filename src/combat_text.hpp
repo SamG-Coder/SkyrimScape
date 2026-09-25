@@ -70,7 +70,7 @@ inline void draw(RE::GFxValue& root,RE::NiCamera* camera,const RE::GRectF& rect,
    const auto& p=snapshot[i];float age=std::chrono::duration<float>(now-p.born).count(),x{},y{},z{};
    if(age>=0&&age<1.25f&&camera->WorldPtToScreenPt3(p.position,x,y,z,1e-5f)&&std::isfinite(x)&&std::isfinite(y)&&x>=0&&x<=1&&y>=0&&y<=1){
     auto key=p.text+(p.block?"B":p.player?"P":"E");
-    if(!exists||rendered[i]!=key){system_text::draw(label,p.text,3.,p.block?0x71D9FF:p.player?0xFF6868:0xFFE8A0);rendered[i]=key;}
+    if(!exists||rendered[i]!=key){system_text::draw(label,p.text,3.,p.block?0x71D9FF:p.player?0xFF6868:0xFFE8A0,true);rendered[i]=key;}
     info.SetPosition(rect.left+x*(rect.right-rect.left)-system_text::width(p.text,3.)*.5+(static_cast<int>(p.lane)-1)*20,rect.top+(1-y)*(rect.bottom-rect.top)-age*48-p.lane*14);
     info.SetAlpha(std::clamp((1.25f-age)/.4f,0.f,1.f)*100);info.SetVisible(true);
    }

@@ -77,6 +77,10 @@ User confirmed mapped font labels still failed. All custom text now uses origina
 Added Windows Segoe UI semibold glyph extraction using GDI gray coverage and cached HUD geometry. A native test verifies this machine resolves Segoe UI, provides all required glyphs with nonzero advances, and returns anti-aliased coverage. Added combat policy tests for defense thresholds/hysteresis, no-threat/equipment gating, heavy-attack cadence/cooldown, threat priority and stamina reserve. All five suites pass. Native control integration compiles; no automated gameplay input was used. User validation remains necessary for block/power animation execution, stamina consumption and font appearance.
 
 
+## 0.3.10 outlined combat text
+
+Added cached, dilated glyph coverage for black combat-label outlines, drawn before coloured glyphs. Preserves existing font, colours, placement and fade animation. Native build and five existing regression suites pass; live visual confirmation remains pending.
+
 ## 0.3.9 ramp and step walking
 
 Replaced cell-centre height classification and straight interpolated height checks with sampled ground profiles. Walking allows 24-unit step changes and slopes up to 45 degrees, with eight-unit floor samples and physical checks along the floor. New regressions cover walking upstairs/downstairs without jumps, tall-riser rejection, walkable ramps, steep-slope rejection and hill crests. All five suites pass. Limits are conservative planner defaults; the SDK does not expose a confirmed usable step-height field in the common character-controller layout. Native stair/ramp behavior and performance require user playtesting.
