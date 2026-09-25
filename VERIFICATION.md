@@ -77,6 +77,10 @@ User confirmed mapped font labels still failed. All custom text now uses origina
 Added Windows Segoe UI semibold glyph extraction using GDI gray coverage and cached HUD geometry. A native test verifies this machine resolves Segoe UI, provides all required glyphs with nonzero advances, and returns anti-aliased coverage. Added combat policy tests for defense thresholds/hysteresis, no-threat/equipment gating, heavy-attack cadence/cooldown, threat priority and stamina reserve. All five suites pass. Native control integration compiles; no automated gameplay input was used. User validation remains necessary for block/power animation execution, stamina consumption and font appearance.
 
 
+## 0.3.11 context menu
+
+Added contextual actor/object actions plus ground walking, a clamped HUD panel with target title/hover highlight, dismissal handling and explicit action dispatch through shared order execution. Added a dialogue-capability check and target/world/death validation. Tests cover actor action availability, edge placement, header/outside rejection and row selection. Native build and all six suites pass; visual appearance, menu selection and native interaction outcomes require user gameplay validation.
+
 ## 0.3.10 outlined combat text
 
 Added cached, dilated glyph coverage for black combat-label outlines, drawn before coloured glyphs. Preserves existing font, colours, placement and fade animation. Native build and five existing regression suites pass; live visual confirmation remains pending.

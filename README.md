@@ -2,7 +2,9 @@
 
 An experimental SKSE plugin that turns Skyrim Special Edition into a RuneScape-style click adventure, with an elevated orbit camera, click-to-walk, interactions and hostile-target melee orders.
 
-**Version 0.3.10. Windows x64 Skyrim runtime 1.7.104.0 only.** The plugin refuses other runtimes. This is a source repository, not a complete mod-manager-ready release.
+**Version 0.3.11. Windows x64 Skyrim runtime 1.7.104.0 only.** The plugin refuses other runtimes. This is a source repository, not a complete mod-manager-ready release.
+
+Right-click opens a contextual action panel for the nearest picked target and the ground under that screen point. Actions include Walk Here, Attack, Talk (only for non-hostile actors that allow dialogue), Search on bodies, Open on doors/containers, Take on items, and Use/Activate on furniture/activators. Friendly actors without dialogue use Interact. Opening the menu stops the current order. Left-click selects; Escape, right-click again or an outside click dismisses without selecting. Middle-button orbit also closes it. Target handles are revalidated on selection, and Talk is cancelled if the actor dies or becomes hostile before arrival. Native activation still handles dialogue, locks, ownership and scripted interactions; the menu does not enumerate hidden objects behind the nearest target.
 
 Combat numbers and BLOCK use an anti-aliased black outline, approximately 1.5 HUD pixels thick, behind their existing coloured Segoe UI glyphs. Outline masks and rendered label shapes are cached.
 
@@ -30,7 +32,7 @@ Completed walks, corrected facing, the camera and the terrain overlay have been 
 | Left-click ground | Walk to the destination |
 | Left-click hostile actor | Approach and issue melee input |
 | Left-click eligible actor/object | Approach and activate |
-| Right-click | Cancel the order |
+| Right-click | Stop the current order and open contextual actions; right-click again to dismiss |
 | Hold middle mouse and move | Orbit and tilt |
 | Scroll down / up | Zoom out / in |
 | F7 | Toggle terrain overlay |
