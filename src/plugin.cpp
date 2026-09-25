@@ -8,6 +8,7 @@
 #include "terrain_overlay.hpp"
 #include "combat_text.hpp"
 #include "combat_policy.hpp"
+#include "route_following.hpp"
 namespace {
 using Clock=std::chrono::steady_clock;
 scape::Vec vec(RE::NiPoint3 p){return {p.x,p.y,p.z};}
@@ -35,6 +36,7 @@ struct State{
  scape::Vec plannedTarget{};
  Clock::time_point nextPlan{};
  bool planning{};
+ scape::Vec planOrigin{};Clock::time_point nextLookahead{};
  Clock::time_point planStarted{};std::size_t planSlices{};double maxPlanSliceMs{};
  Clock::time_point nextMovementLog{};
  bool savedRunning{},runningOwned{};
@@ -153,19 +155,20 @@ RE::NiCamera* findCamera(RE::NiAVObject* o){
 }
 bool planRoute(scape::Vec position){
  auto started=Clock::now();
- if(!state.planning){state.planStarted=started;state.planSlices=0;state.maxPlanSliceMs=0;}
+ if(!state.planning){state.planStarted=started;state.planSlices=0;state.maxPlanSliceMs=0;state.planOrigin=position;}
  auto goalVisible=[](scape::Vec approach){
   auto target=state.target.get();if(!target)return false;
   auto hit=cast(point(approach+scape::Vec{0,0,60}),point(state.destination+scape::Vec{0,0,60}));
   return !hit.valid||hit.reference==target.get();
  };
- auto result=native_navigation::plan(position,state.destination,state.order==Order::walk,clearTraversal,goalVisible);
+ auto result=native_navigation::plan(state.planOrigin,state.destination,state.order==Order::walk,clearTraversal,goalVisible);
  ++state.planSlices;auto elapsed=std::chrono::duration<double,std::milli>(Clock::now()-started).count();state.maxPlanSliceMs=(std::max)(state.maxPlanSliceMs,elapsed);
  if(elapsed>12)spdlog::info("PLAN slow slice {:.2f} ms expanded={} pending={}",elapsed,result.stats.expanded,result.pending);
  state.planning=result.pending;state.nextPlan=Clock::now()+std::chrono::milliseconds(result.pending?0:750);
  if(result.pending)return false;
  auto& route=result.route;
  if(route.points.empty()){spdlog::info("No usable grid route: slices={} maxSliceMs={:.2f}; see preceding GRID reason",state.planSlices,state.maxPlanSliceMs);return false;}
+ if(scape::planarDistance(position,state.planOrigin)>8.f&&!scape::joinMovingRoute(route,position,[](scape::Vec a,scape::Vec b){return native_navigation::gridCache().grid.canWalk(a,b,clearTraversal);})){spdlog::info("PLAN moving join blocked; keep current validated route");return false;}
  state.route=std::move(route.points);state.waypoint=0;state.plannedTarget=state.destination;
  state.traversal=std::move(route.traversal);state.activeTraversal=(std::numeric_limits<std::size_t>::max)();
  state.nextPlan=Clock::now()+std::chrono::milliseconds(750);
@@ -200,7 +203,11 @@ void click(){
   spdlog::info("PICK ground ray continued to {:.2f} {:.2f} {:.2f} normalZ={:.3f}",hit.position.x,hit.position.y,hit.position.z,hit.normalZ);
  }
  const auto previous=state;
- cancel(RE::PlayerControls::GetSingleton());state.destination=hit.position;state.order=Order::walk;
+ bool keepWalking=!actionHit&&state.order==Order::walk&&state.waypoint<state.route.size()&&
+  state.activeTraversal==(std::numeric_limits<std::size_t>::max)()&&scape::sameWalkDirection(vec(p->GetPosition()),state.route[state.waypoint],hit.position);
+ if(keepWalking){native_navigation::gridCache().grid.abandon();state.planning=false;spdlog::info("CLICK keeps active walk while replacing destination");}
+ else cancel(RE::PlayerControls::GetSingleton());
+ state.destination=hit.position;state.order=Order::walk;
  if(hit.reference&&hit.reference->GetBaseObject()){
   auto actor=hit.reference->As<RE::Actor>();auto type=hit.reference->GetBaseObject()->GetFormType();
   if(actor&&!actor->IsDead()&&actor->IsHostileToActor(p))state.order=Order::attack;
@@ -211,7 +218,7 @@ void click(){
  if(state.order==Order::walk||!actionInReach(p,hit.reference)){
   if(!planRoute(state.lastPosition)&&!state.planning&&state.order==Order::walk){rejectedClick();cancel(RE::PlayerControls::GetSingleton());if(previous.order==Order::walk){state=previous;state.planning=false;}return;}
  }else{state.plannedTarget=state.destination;state.nextPlan={};}
- if(state.order==Order::walk&&!state.route.empty())state.destination=state.route.back();
+ if(state.order==Order::walk&&!state.planning&&!state.route.empty())state.destination=state.route.back();
  spdlog::info("Click screen {:.3f} {:.3f}, collision {:.1f} {:.1f} {:.1f}, selected {:.1f} {:.1f} {:.1f}",state.cursorX,state.cursorY,hit.position.x,hit.position.y,hit.position.z,state.destination.x,state.destination.y,state.destination.z);
  {std::lock_guard lock(displayMutex);clickFeedback={state.cursorX,state.cursorY,state.order!=Order::walk,Clock::now()};}
  spdlog::info("Order {} target {:08X} destination {:.1f} {:.1f} {:.1f}",static_cast<int>(state.order),hit.reference?hit.reference->GetFormID():0,state.destination.x,state.destination.y,state.destination.z);
@@ -288,17 +295,21 @@ void tick(RE::PlayerControls* c){
  }
  if(state.blockHeld){blockButton(c,false);spdlog::info("AUTO BLOCK released");}
  bool pendingTraversal=false;for(auto i=state.waypoint;i<state.traversal.size();++i)if(state.traversal[i]!=scape::nav::Traversal::walk)pendingTraversal=true;
- const bool arrived=!pendingTraversal&&state.activeTraversal==(std::numeric_limits<std::size_t>::max)()&&
+ const bool arrived=!state.planning&&!pendingTraversal&&state.activeTraversal==(std::numeric_limits<std::size_t>::max)()&&
   (state.order==Order::walk?(scape::reached(position,state.destination,orderRange())&&std::abs(position.z-state.destination.z)<=35.f):actionInReach(p,target.get()));
  if(!arrived){
   if((state.planning||state.order!=Order::walk)&&state.activeTraversal==(std::numeric_limits<std::size_t>::max)()&&now>=state.nextPlan&&
-     (state.route.empty()||state.waypoint>=state.route.size()||(state.destination-state.plannedTarget).length()>80.f)){
+     (state.planning||state.route.empty()||state.waypoint>=state.route.size()||(state.destination-state.plannedTarget).length()>80.f)){
    if(!planRoute(position)){
-    c->data.moveInputVec={0,0};c->data.prevMoveVec={0,0};
-    state.route.clear();state.traversal.clear();state.waypoint=0;state.lastProgress=now;
-    if(!state.planning&&state.order==Order::walk){rejectedClick();cancel(c);}return;
+    bool keep=state.order==Order::walk&&state.waypoint<state.route.size();
+    if(!keep){
+     c->data.moveInputVec={0,0};c->data.prevMoveVec={0,0};
+     state.route.clear();state.traversal.clear();state.waypoint=0;state.lastProgress=now;
+     if(!state.planning&&state.order==Order::walk){rejectedClick();cancel(c);}return;
+    }
+    if(!state.planning){rejectedClick();state.destination=state.route.back();spdlog::info("PLAN replacement rejected; continuing previous walk");}
    }
-   if(state.order==Order::walk)state.destination=state.route.back();
+   if(state.order==Order::walk&&!state.planning&&!state.route.empty())state.destination=state.route.back();
   }
   while(state.waypoint<state.route.size()&&state.traversal[state.waypoint]==scape::nav::Traversal::walk){
    bool takeoff=state.waypoint+1<state.route.size()&&state.traversal[state.waypoint+1]!=scape::nav::Traversal::walk;
@@ -310,8 +321,17 @@ void tick(RE::PlayerControls* c){
   if(state.waypoint>=state.route.size()){
    // Reaching a projected approach point is not proof that a distant object is in activation range.
    c->data.moveInputVec={0,0};c->data.prevMoveVec={0,0};
-   if(state.order==Order::walk)cancel(c);
+   if(state.order==Order::walk&&!state.planning)cancel(c);
    return;
+  }
+  if(now>=state.nextLookahead&&state.activeTraversal==(std::numeric_limits<std::size_t>::max)()){
+   state.nextLookahead=now+std::chrono::milliseconds(100);
+   auto end=(std::min)(state.route.size(),state.waypoint+3);
+   for(auto next=state.waypoint+1;next<end;++next){
+    if(state.traversal[next-1]!=scape::nav::Traversal::walk||state.traversal[next]!=scape::nav::Traversal::walk)break;
+    if(!native_navigation::gridCache().grid.canWalk(position,state.route[next],clearTraversal))break;
+    state.waypoint=next;
+   }
   }
   // Face the route and run forward, as requested. Keep the native movement
   // heading in sync this tick; the visible RuneScape orbit stays independent.
@@ -326,7 +346,7 @@ void tick(RE::PlayerControls* c){
   }
   // Brake at the final point so native acceleration does not carry us past it.
   if(state.waypoint+1==state.route.size()){
-   const float speed=std::clamp(scape::planarDistance(position,state.destination)/100.f,.3f,1.f);
+   const float speed=std::clamp(scape::planarDistance(position,state.route.back())/100.f,.3f,1.f);
    movement.x*=speed;movement.y*=speed;
   }
   c->data.moveInputVec={movement.x,movement.y};c->data.prevMoveVec=c->data.moveInputVec;state.ownsMovement=true;
@@ -512,6 +532,16 @@ void hud(RE::HUDMenu* self,float dt,std::uint32_t time){
  originalHud(self,dt,time);if(!self->uiMovie)return;
  Display data;ClickFeedback feedback;std::shared_ptr<const TerrainDisplay> terrain;std::vector<scape::Vec> route;{std::lock_guard lock(displayMutex);data=display;feedback=clickFeedback;terrain=terrainDisplay;route=displayedRoute;}
  RE::GFxValue root,clip;if(!self->uiMovie->GetVariable(&root,"_root"))return;
+ // Use the HUD's own enable method; save its setting on this movie so a
+ // recreated HUD or a user-disabled crosshair is restored correctly.
+ RE::GFxValue base,saved;
+ if(root.GetMember("HUDMovieBaseInstance",&base)&&base.IsDisplayObject()){
+  bool owned=base.GetMember("SkyrimScapeSavedCrosshair",&saved)&&saved.IsBool();
+  if(data.enabled){
+   if(!owned){RE::GFxValue enabled;if(base.GetMember("bCrosshairEnabled",&enabled)&&enabled.IsBool()){base.SetMember("SkyrimScapeSavedCrosshair",enabled);owned=true;}}
+   if(owned){const std::array<RE::GFxValue,1> args{RE::GFxValue(false)};base.Invoke("SetCrosshairEnabled",args);}
+  }else if(owned){const std::array<RE::GFxValue,1> args{saved};base.Invoke("SetCrosshairEnabled",args);base.SetMember("SkyrimScapeSavedCrosshair",RE::GFxValue());}
+ }
  drawTerrain(root,data.enabled&&data.overlay,terrain,route,self->uiMovie->GetVisibleFrameRect());
  auto combatCamera=RE::PlayerCamera::GetSingleton();
  combat_text::draw(root,combatCamera?findCamera(combatCamera->cameraRoot.get()):nullptr,self->uiMovie->GetVisibleFrameRect(),data.enabled);
@@ -557,6 +587,6 @@ SKSEPluginLoad(const SKSE::LoadInterface* skse){
  SKSE::Init(skse);auto directory=SKSE::log::log_directory();if(!directory)return false;
  auto log=spdlog::basic_logger_mt("SkyrimScape",(*directory/"SkyrimScape.log").string(),true);
  spdlog::set_default_logger(log);spdlog::flush_on(spdlog::level::info);
- spdlog::info("SkyrimScape experimental 0.3.7 loaded on {}",skse->RuntimeVersion().string());
+ spdlog::info("SkyrimScape experimental 0.3.8 loaded on {}",skse->RuntimeVersion().string());
  return SKSE::GetMessagingInterface()->RegisterListener(message);
 }

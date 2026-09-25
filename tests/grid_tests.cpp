@@ -1,4 +1,5 @@
 #include "grid_navigation.hpp"
+#include "route_following.hpp"
 #include <cstdlib>
 #include <iostream>
 using namespace scape;
@@ -37,6 +38,13 @@ int main(){
  require(blockedNow.route.points.empty(),"A new order must not reuse stale dynamic collision acceptance");
  world.update(floor,{256,256,0},600);
  require(world.statistics().reused>0&&world.statistics().built==0,"Unchanged tile groups must be reused");
+ require(world.canWalk({64,64,0},{448,448,0},clear),"Unchanged cache must retain usable radius clearance");
+ require(sameWalkDirection({0,0,0},{100,0,0},{200,30,0})&&!sameWalkDirection({0,0,0},{100,0,0},{-100,0,0}),"Only compatible forward clicks may preserve current movement");
+ nav::Route moving;moving.points={{64,64,0},{128,64,0},{256,64,0}};moving.traversal.assign(3,nav::Traversal::walk);
+ require(joinMovingRoute(moving,{144,64,0},[&](Vec a,Vec b){return world.canWalk(a,b,clear);})&&moving.points.size()==2&&moving.points.back().x==256,"Moving plan completion must join ahead without returning to origin");
+ nav::Route jumping;jumping.points={{64,64,0},{128,64,0},{192,64,0}};jumping.traversal={nav::Traversal::walk,nav::Traversal::walk,nav::Traversal::jump};
+ require(joinMovingRoute(jumping,{80,64,0},[](Vec,Vec){return true;})&&jumping.traversal.back()==nav::Traversal::jump&&jumping.points[1].x==128,"Moving join must retain the traversal takeoff");
+ auto blockedJoin=moving;require(!joinMovingRoute(blockedJoin,{144,64,0},[](Vec,Vec){return false;}),"Blocked joining segment must reject route replacement");
  floor[0].vertices[0].z=4;world.update(floor,{256,256,0},600);
  require(world.statistics().built>0,"Changed geometry must invalidate affected tile groups");
  std::vector<nav::Triangle> narrow;rectangle(narrow,0,0,512,24,0);world.update(narrow,{256,12,0},600);

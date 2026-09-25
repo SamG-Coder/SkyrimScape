@@ -66,7 +66,7 @@ public:
  bool pending()const{return search.has_value();}
  void clear(){abandon();mesh.clear();sources.clear();groups.clear();cells.clear();columns.clear();clearance.clear();edges.clear();}
  void update(std::vector<nav::Triangle> input,Vec focus,float range=2600.f){
-  abandon();mesh=std::move(input);sources.clear();stats={};
+  auto previousGroups=groups.size();abandon();mesh=std::move(input);sources.clear();stats={};
   int gx0=groupCoordinate(coordinate(focus.x-range)),gx1=groupCoordinate(coordinate(focus.x+range));
   int gy0=groupCoordinate(coordinate(focus.y-range)),gy1=groupCoordinate(coordinate(focus.y+range));
   for(std::size_t i=0;i<mesh.size();++i){auto& t=mesh[i];if(!nav::walkable(t))continue;
@@ -94,6 +94,7 @@ public:
    }
    groups[id]=std::move(group);++stats.built;
   }
+  if(!cells.empty()&&stats.built==0&&groups.size()==previousGroups){stats.groups=groups.size();stats.cells=cells.size();edges.clear();return;}
   cells.clear();columns.clear();
   for(const auto& [id,group]:groups)for(const auto& cell:group.cells){columns[key(cell.x,cell.y)].push_back(cells.size());cells.push_back(cell);}
   clearance.assign(cells.size(),-1);edges.clear();stats.groups=groups.size();stats.cells=cells.size();
@@ -102,6 +103,11 @@ public:
  const Stats& statistics()const{return stats;}
  std::vector<Cell> supportedCells(){std::vector<Cell> result;for(std::size_t i=0;i<cells.size();++i)if(clearCell(i))result.push_back(cells[i]);return result;}
  using Validator=std::function<bool(Vec,Vec,nav::Traversal)>;
+ bool canWalk(Vec a,Vec b,const Validator& validate)const{
+  int steps=static_cast<int>(std::ceil((b-a).length()/12.f));
+  for(int i=0;i<=steps;++i)if(!footprint(a+(b-a)*(static_cast<float>(i)/(std::max)(1,steps))))return false;
+  return validate(a,b,nav::Traversal::walk);
+ }
  Result plan(Vec start,Vec finish,const Validator& validate,float maxDrop,float goalRadius=0,
              std::size_t sliceExpansions=24000,std::chrono::milliseconds sliceTime=(std::chrono::milliseconds::max)(),
              const std::function<bool(Vec)>& goalVisible={}){
