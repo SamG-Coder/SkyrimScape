@@ -15,6 +15,11 @@ int main(){
  require(!route.route.points.empty(),"Grid must route over a continuous floor without triangle adjacency links");
  require(route.route.points.size()<=4,"Open grid route must simplify to smooth any-angle travel");
  auto forward=world.plan({67,80,0},{448,80,0},clear,180);
+ require(!world.plan({64,64,-34},{448,448,0},clear,180).route.points.empty(),"Physical floor slightly below authored navmesh must connect without a jump");
+ require(world.plan({64,64,-65},{448,448,0},clear,180).route.points.empty(),"Start projection must remain bounded between height layers");
+ auto blockedNearest=[](Vec a,Vec b,nav::Traversal){return planarDistance(a,{80,80,0})>12&&planarDistance(b,{80,80,0})>12;};
+ auto alternate=world.plan({67,80,0},{400,240,0},blockedNearest,180,80);
+ require(!alternate.route.points.empty(),"A blocked nearest grid centre must allow a validated alternate start connection");
  require(forward.route.points.size()>1&&forward.route.points[1].x>67,"Open-floor first leg must not step backward to the nearest cell");
  auto actorBlocks=[](Vec a,Vec b,nav::Traversal){return planarDistance(a,{400,240,0})>30&&planarDistance(b,{400,240,0})>30;};
  auto approach=world.plan({64,240,0},{400,240,0},actorBlocks,180,80);

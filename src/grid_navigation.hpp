@@ -76,6 +76,8 @@ class World {
   return true;
  }
 public:
+ // Floor projection alone does not prove clearance; callers also use canWalk.
+ std::optional<Vec> projectGround(Vec hint,float tolerance)const{return groundAt(hint,tolerance);}
  void abandon(){search.reset();}
  bool pending()const{return search.has_value();}
  void clear(){abandon();mesh.clear();sources.clear();groups.clear();cells.clear();columns.clear();clearance.clear();edges.clear();}
@@ -118,7 +120,9 @@ public:
  std::vector<Cell> supportedCells(){std::vector<Cell> result;for(std::size_t i=0;i<cells.size();++i)if(clearCell(i))result.push_back(cells[i]);return result;}
  using Validator=std::function<bool(Vec,Vec,nav::Traversal)>;
  std::vector<Vec> walkProfile(Vec a,Vec b)const{
-  std::vector<Vec> profile;auto first=groundAt(a,32.f);if(!first||!footprint(*first))return {};
+  // Skyrim's authored nav surface can sit above the physical floor. This is
+  // endpoint alignment, not a larger step limit: subsequent samples still use 24.
+  std::vector<Vec> profile;auto first=groundAt(a,48.f);if(!first||!footprint(*first))return {};
   profile.push_back(*first);int steps=(std::max)(1,static_cast<int>(std::ceil(planarDistance(a,b)/8.f)));
   for(int i=1;i<=steps;++i){auto xy=a+(b-a)*(static_cast<float>(i)/steps);xy.z=profile.back().z;
    auto ground=groundAt(xy,stepHeight+.5f);
@@ -146,17 +150,30 @@ public:
   auto started=std::chrono::steady_clock::now();
   if(search&&((search->start-start).length()>8.f||(search->finish-finish).length()>32.f||search->goalRadius!=goalRadius))abandon();
   if(!search){
+  // A valid straight walk needs no connection to an arbitrary grid centre.
+  if(goalRadius==0&&canWalk(start,finish,validate)){
+   result.route.points={start,finish};result.route.traversal={nav::Traversal::walk,nav::Traversal::walk};result.reason="direct-walk";return result;
+  }
   // Actor/object orders end in an approach region, never inside the target's collider.
   auto from=nearest(start,64.f,80.f),to=nearest(finish,48.f,80.f);
   if(!from){result.reason="start-has-no-radius-clear-cell";return result;}
   if(!to&&goalRadius==0){result.reason="destination-has-no-radius-clear-cell";return result;}
-  if(!canWalk(start,cells[*from].position,validate)){result.reason="start-to-grid-blocked";return result;}
-  if(goalRadius==0&&!canWalk(cells[*to].position,finish,validate)){result.reason="grid-to-destination-blocked";return result;}
-  if(goalRadius==0){
-   if(canWalk(start,finish,validate)){
-    result.route.points={start,finish};result.route.traversal={nav::Traversal::walk,nav::Traversal::walk};result.reason="direct-walk";return result;
+  if(!canWalk(start,cells[*from].position,validate)){
+   // The closest centre may be behind a wall or on the wrong height layer.
+   // Try bounded nearby alternatives, each with full footprint/physics checks.
+   std::vector<std::pair<float,std::size_t>> candidates;
+   auto x=coordinate(start.x),y=coordinate(start.y);
+   for(int dx=-2;dx<=2;++dx)for(int dy=-2;dy<=2;++dy){
+    auto column=columns.find(key(x+dx,y+dy));if(column==columns.end())continue;
+    for(auto i:column->second){auto p=cells[i].position;float h=planarDistance(start,p),v=std::abs(start.z-p.z);
+     if(i!=*from&&h<=64&&v<=80&&clearCell(i))candidates.emplace_back(h+v*2,i);
+    }
    }
+   std::sort(candidates.begin(),candidates.end());from.reset();
+   for(std::size_t n=0;n<(std::min)(candidates.size(),std::size_t{16});++n){auto i=candidates[n].second;if(canWalk(start,cells[i].position,validate)){from=i;break;}}
+   if(!from){result.reason="start-to-grid-blocked";return result;}
   }
+  if(goalRadius==0&&!canWalk(cells[*to].position,finish,validate)){result.reason="grid-to-destination-blocked";return result;}
   search.emplace();auto& s=*search;s.start=start;s.finish=finish;s.goalRadius=goalRadius;s.from=*from;s.to=to.value_or(cells.size());
   s.cost.assign(cells.size(),std::numeric_limits<float>::infinity());s.parent.assign(cells.size(),cells.size());s.actions.resize(cells.size());
   s.cost[*from]=0;s.queue.push({0,0,*from});

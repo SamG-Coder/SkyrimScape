@@ -19,6 +19,7 @@ function Get-PinnedDependency([string]$Name,[string]$Url,[string]$Revision){
 }
 Get-PinnedDependency 'CommonLibSSE-NG' 'https://github.com/alandtse/CommonLibSSE-NG.git' 'a898f469851c464d05137bb74b069dd234897643'
 Get-PinnedDependency 'vcpkg' 'https://github.com/microsoft/vcpkg.git' '6ade29bbd5a4c7e99439ec52adbc63c073953a57'
+Get-PinnedDependency 'meshoptimizer' 'https://github.com/zeux/meshoptimizer.git' '3d79872801b9c5f44d413e454bc7ed7621c03823'
 & "$root\external\vcpkg\bootstrap-vcpkg.bat" -disableMetrics
 if($LASTEXITCODE -ne 0){throw 'vcpkg bootstrap failed'}
 & "$root\external\vcpkg\vcpkg.exe" install spdlog:x64-windows-static directxtk:x64-windows-static rapidcsv:x64-windows-static --disable-metrics

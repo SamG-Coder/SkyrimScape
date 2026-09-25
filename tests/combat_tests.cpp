@@ -14,5 +14,14 @@ int main(){
  require(!shouldPower(false,true,false,3,80,100)&&!shouldPower(false,true,true,2,80,100),"Cooldown and cadence must prevent heavy-attack spam");
  require(!shouldPower(false,true,true,3,40,100)&&!shouldPower(false,true,true,3,80,200),"Heavy attack must retain a stamina reserve");
  require(!shouldPower(false,false,true,3,100,100),"Melee automation must not charge ranged weapons");
+ Motion motion;motion.update({0,400,0},1);motion.update({20,400,0},1.1);
+ auto lead=motion.intercept({0,0,0},{20,400,0});
+ require(lead.x>20&&lead.y==400&&scape::planarDistance(lead,{20,400,0})<=120,"Chase must lead observed lateral movement with a bounded horizon");
+ require(motion.intercept({20,350,0},{20,400,0}).x==20,"Close melee aiming must use the actual target position");
+ motion.update({900,400,0},1.2);require(motion.velocity.length()==0,"Teleport must clear prediction");
+ motion.update({910,400,0},4);require(motion.velocity.length()==0,"Stale velocity must not survive a pause");
+ require(shouldEvade(true,false,true,true,15),"Free grounded player can evade when unable to block");
+ require(!shouldEvade(true,true,true,true,100)&&!shouldEvade(true,false,false,true,100)&&!shouldEvade(true,false,true,false,100),"Defense, committed attacks and airborne traversal must suppress sidesteps");
+ require(shouldRetarget(true,100,400)&&!shouldRetarget(true,100,110)&&!shouldRetarget(false,100,400)&&!shouldRetarget(true,400,500),"Only a recent nearby hostile attacker may interrupt a distant chase");
  std::cout<<"PASS: combat stamina reserve, defense hysteresis, threat priority and power cadence\n";
 }

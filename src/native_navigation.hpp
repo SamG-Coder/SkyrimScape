@@ -93,6 +93,8 @@ inline scape::grid::Result plan(scape::Vec start,scape::Vec finish,bool normaliz
  if(result.pending)return result;
  spdlog::info("GRID result={} cells={} groups={} reused={} rebuilt={} expanded={} collisionChecks={} waypoints={}",result.reason,result.stats.cells,result.stats.groups,result.stats.reused,result.stats.built,result.stats.expanded,result.stats.clearanceChecks,route.points.size());
  if(route.points.empty()){
+  auto floor=cache.grid.projectGround(start,80.f);
+  spdlog::info("GRID start alignment: physicalZ={:.2f} surfaceFound={} surfaceZ={:.2f} offset={:.2f}",start.z,bool(floor),floor?floor->z:0.f,floor?floor->z-start.z:0.f);
   auto from=scape::nav::locate(mesh,start,160.f),to=scape::nav::locate(mesh,finish,160.f);
   spdlog::info("Route rejected: {} triangles, start projected {}, goal projected {}, expanded {}; start {:.1f} {:.1f} {:.1f}, goal {:.1f} {:.1f} {:.1f}",mesh.size(),bool(from),bool(to),route.expanded,start.x,start.y,start.z,finish.x,finish.y,finish.z);
  }
