@@ -84,7 +84,7 @@ struct Route{std::vector<Vec> points;std::size_t expanded{};std::vector<Traversa
 inline bool corridorOnMesh(const std::vector<Triangle>& triangles,Vec from,Vec to){
  auto delta=to-from;float length=delta.length();if(length<1.f)return true;
  // Limit work and shortcut length, and keep room for a character rather than a point.
- if(length>768.f)return false;
+ if(length>1536.f)return false;
  auto side=Vec{-delta.y,delta.x,0};float width=side.length();
  if(width>.01f)side=side*(14.f/width);
  int count=static_cast<int>(std::ceil(length/24.f));
@@ -100,7 +100,7 @@ inline void smooth(Route& route,const std::vector<Triangle>& corridor){
  std::vector<Vec> result{route.points.front()};std::vector<Traversal> types{Traversal::walk};std::size_t cursor=0;
  while(cursor+1<route.points.size()){
   std::size_t next=cursor+1;
-  auto end=(std::min)(route.points.size()-1,cursor+12);
+  auto end=(std::min)(route.points.size()-1,cursor+64);
   for(auto i=cursor+1;i<=end;++i)if(route.traversal[i]!=Traversal::walk){end=i-1;break;}
   for(auto candidate=end;candidate>cursor+1;--candidate)
    if(corridorOnMesh(corridor,route.points[cursor],route.points[candidate])){next=candidate;break;}
@@ -119,6 +119,7 @@ inline Route plan(const std::vector<Triangle>& triangles,Vec start,Vec finish,fl
  std::vector<float> costs(absent,std::numeric_limits<float>::infinity());
  std::vector<std::size_t> parent(absent,absent);std::vector<Vec> portals(absent);
  std::vector<Vec> landings(absent);std::vector<Traversal> actions(absent);
+ std::vector<Vec> entries(absent);entries[from->triangle]=from->point;
  costs[from->triangle]=0;queue.push({0,0,from->triangle});
  while(!queue.empty()&&result.expanded<50000){
   auto current=queue.top();queue.pop();if(current.cost>costs[current.index])continue;++result.expanded;
@@ -126,13 +127,12 @@ inline Route plan(const std::vector<Triangle>& triangles,Vec start,Vec finish,fl
    std::vector<std::size_t> chain;
    for(auto index=current.index;index!=from->triangle;index=parent[index]){if(index==absent)return {};chain.push_back(index);}
    result.points.push_back(from->point);
-   // Each centroid -> edge midpoint -> centroid segment stays in its convex triangle.
-   if(!chain.empty())result.points.push_back(triangles[from->triangle].center());
+   // Consecutive shared-edge points lie in the same convex triangle. There is
+   // no need to detour to its center between crossing points.
    result.traversal.resize(result.points.size());
    for(auto it=chain.rbegin();it!=chain.rend();++it){
     result.points.push_back(portals[*it]);result.traversal.push_back(Traversal::walk);
     if(actions[*it]!=Traversal::walk){result.points.push_back(landings[*it]);result.traversal.push_back(actions[*it]);}
-    result.points.push_back(triangles[*it].center());result.traversal.push_back(Traversal::walk);
    }
    result.points.push_back(to->point);
    result.traversal.push_back(Traversal::walk);
@@ -142,12 +142,13 @@ inline Route plan(const std::vector<Triangle>& triangles,Vec start,Vec finish,fl
   }
   const auto& tri=triangles[current.index];
   auto relax=[&](std::size_t next,Vec midpoint,Vec landing,Traversal action){
-   const auto& neighbor=triangles[next];
-   auto cost=current.cost+(tri.center()-midpoint).length()+(landing-midpoint).length()+(neighbor.center()-landing).length()+(action==Traversal::walk?0.f:100.f);
+   float actionCost=action==Traversal::walk?0.f:250.f+std::abs(landing.z-midpoint.z)*.5f;
+   auto cost=current.cost+(entries[current.index]-midpoint).length()+(landing-midpoint).length()+actionCost;
    if(cost>=costs[next])return;
    costs[next]=cost;parent[next]=current.index;portals[next]=midpoint;
    landings[next]=landing;actions[next]=action;
-   queue.push({cost+(neighbor.center()-triangles[to->triangle].center()).length(),cost,next});
+   entries[next]=landing;
+   queue.push({cost+(landing-to->point).length(),cost,next});
   };
   for(std::size_t edge=0;edge<3;++edge){
    auto found=indices.find(tri.neighbors[edge]);if(found==indices.end())continue;

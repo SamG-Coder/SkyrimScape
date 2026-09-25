@@ -2,7 +2,7 @@
 
 An experimental SKSE plugin that turns Skyrim Special Edition into a RuneScape-style click adventure, with an elevated orbit camera, click-to-walk, interactions and hostile-target melee orders.
 
-**Version 0.2.6. Windows x64 Skyrim runtime 1.7.104.0 only.** The plugin refuses other runtimes. This is a source repository, not a complete mod-manager-ready release.
+**Version 0.2.7. Windows x64 Skyrim runtime 1.7.104.0 only.** The plugin refuses other runtimes. This is a source repository, not a complete mod-manager-ready release.
 
 ## Features
 
@@ -32,6 +32,8 @@ Completed walks, corrected facing, the camera and the terrain overlay have been 
 The mode starts disabled and resets on save loading. Menus and scripted control restrictions cancel orders.
 
 The overlay is an **X-ray diagnostic**: green is walking-connected terrain, cyan requires a traversal link, orange is disconnected terrain, and gold arrows are calculated drops. Foreground objects can still intercept clicks over green areas.
+
+The active route is drawn in white, with a diamond at the selected destination. Version 0.2.7 routes through shared-edge crossing points instead of triangle centers, scores travel from the entry point, and gives traversal actions an additional cost. Ground clicks without a valid vertical surface projection are rejected rather than falling back to a different nearby endpoint. These changes need continued live testing.
 
 ## Build on Windows
 

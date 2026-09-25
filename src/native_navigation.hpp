@@ -62,7 +62,9 @@ inline std::vector<scape::nav::Triangle> validatedSnapshot(const std::function<b
 inline scape::nav::Route plan(scape::Vec start,scape::Vec finish,bool normalizeGround,
  const std::function<bool(scape::Vec,scape::Vec,scape::nav::Traversal)>& clearTraversal){
  auto mesh=validatedSnapshot(clearTraversal);
- if(normalizeGround)if(auto floor=scape::nav::surface(mesh,finish)){
+ if(normalizeGround){
+  auto floor=scape::nav::surface(mesh,finish);
+  if(!floor){spdlog::info("Ground click rejected: no walk surface within horizontal projection tolerance at {:.1f} {:.1f} {:.1f}",finish.x,finish.y,finish.z);return {};}
   if((floor->point-finish).length()>40.f)spdlog::info("Ground click projected onto surface: height {:.1f} -> {:.1f}",finish.z,floor->point.z);
   finish=floor->point;
  }

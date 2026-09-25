@@ -85,5 +85,13 @@ int main(){
  auto blocked=original;require(nav::addTerrainLinks(blocked,{300,0,100},700.f,180.f,[](Vec,Vec,nav::Traversal){return false;})==0,"Blocked landing clearance must prevent generated connections");
  auto deep=original;for(auto& p:deep[0].vertices)p.z=400;
  require(nav::addTerrainLinks(deep,{300,0,400},700.f,180.f,[](Vec,Vec,nav::Traversal){return true;})==0,"Drops beyond the allowed threshold must not connect");
+ std::vector<nav::Triangle> broad{
+  {100,{{{0,0,0},{2000,0,0},{2000,2000,0}}}},
+  {101,{{{0,0,0},{2000,2000,0},{0,2000,0}}}}
+ };
+ broad[0].neighbors[2]=101;broad[1].neighbors[0]=100;
+ Vec nearA{1950,50,0},nearB{50,1950,0};auto through=nav::plan(broad,nearA,nearB,10);
+ float routeLength=0;for(std::size_t i=1;i<through.points.size();++i)routeLength+=(through.points[i]-through.points[i-1]).length();
+ require(!through.points.empty()&&routeLength<=(nearB-nearA).length()+1.f,"Broad open triangles must not force centroid detours beyond the smoothing distance");
  std::cout<<"PASS: wall detour, segment containment, disconnected floors, endpoint projection, invalid portals and degenerate triangles\n";
 }

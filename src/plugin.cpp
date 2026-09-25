@@ -37,6 +37,7 @@ struct State{
 struct Display{bool enabled{};float x{.5f},y{.5f};bool overlay{};}display;
 struct TerrainDisplay{std::vector<scape::nav::Triangle> mesh;std::vector<unsigned char> reachable;};
 std::shared_ptr<const TerrainDisplay> terrainDisplay;
+std::vector<scape::Vec> displayedRoute;
 struct ClickFeedback{float x{},y{};bool action{};Clock::time_point when{};}clickFeedback;
 std::mutex displayMutex;
 void rejectedClick(){std::lock_guard lock(displayMutex);clickFeedback={state.cursorX,state.cursorY,true,Clock::now()};}
@@ -141,6 +142,7 @@ void click(){
   if(!planRoute(state.lastPosition)){rejectedClick();cancel(RE::PlayerControls::GetSingleton());return;}
  }else{state.plannedTarget=state.destination;state.nextPlan={};}
  if(state.order==Order::walk)state.destination=state.route.back();
+ spdlog::info("Click screen {:.3f} {:.3f}, collision {:.1f} {:.1f} {:.1f}, selected {:.1f} {:.1f} {:.1f}",state.cursorX,state.cursorY,hit.position.x,hit.position.y,hit.position.z,state.destination.x,state.destination.y,state.destination.z);
  {std::lock_guard lock(displayMutex);clickFeedback={state.cursorX,state.cursorY,state.order!=Order::walk,Clock::now()};}
  spdlog::info("Order {} target {:08X} destination {:.1f} {:.1f} {:.1f}",static_cast<int>(state.order),hit.reference?hit.reference->GetFormID():0,state.destination.x,state.destination.y,state.destination.z);
 }
@@ -300,7 +302,9 @@ RE::BSEventNotifyControl input(RE::PlayerControls* c,RE::InputEvent* const* even
    state.nextOverlay=Clock::now()+std::chrono::seconds(2);
   }
  }
- {std::lock_guard lock(displayMutex);display={active,state.cursorX,state.cursorY,state.overlay};}
+ {std::lock_guard lock(displayMutex);display={active,state.cursorX,state.cursorY,state.overlay};displayedRoute.clear();
+  if(active&&state.order!=Order::none){displayedRoute.push_back(vec(RE::PlayerCharacter::GetSingleton()->GetPosition()));for(auto i=state.waypoint;i<state.route.size();++i)displayedRoute.push_back(state.route[i]);}
+ }
  return result;
 }
 using RotationFn=void(*)(RE::ThirdPersonState*,RE::NiQuaternion&);
@@ -339,7 +343,7 @@ void cameraUpdate(RE::ThirdPersonState* self,RE::BSTSmartPointer<RE::TESCameraSt
  RE::NiUpdateData update{};root->Update(update);
 }
 using HudFn=void(*)(RE::HUDMenu*,float,std::uint32_t);REL::Relocation<HudFn> originalHud;
-void drawTerrain(RE::GFxValue& root,bool visible,const std::shared_ptr<const TerrainDisplay>& terrain,const RE::GRectF& rect){
+void drawTerrain(RE::GFxValue& root,bool visible,const std::shared_ptr<const TerrainDisplay>& terrain,const std::vector<scape::Vec>& route,const RE::GRectF& rect){
  RE::GFxValue layer,label;
  if(!root.GetMember("SkyrimScapeTerrain",&layer)||!layer.IsDisplayObject())root.CreateEmptyMovieClip(&layer,"SkyrimScapeTerrain",15997);
  if(!root.GetMember("SkyrimScapeTerrainLegend",&label)){
@@ -384,12 +388,22 @@ void drawTerrain(RE::GFxValue& root,bool visible,const std::shared_ptr<const Ter
   vertex("moveTo",ax,ay);vertex("lineTo",bx,by);
   vertex("moveTo",bx-dx*7+dy*4,by-dy*7-dx*4);vertex("lineTo",bx,by);vertex("lineTo",bx-dx*7-dy*4,by-dy*7+dx*4);
  }
+ const std::array<RE::GFxValue,3> routeStroke{RE::GFxValue(2.5),RE::GFxValue(16777215.),RE::GFxValue(100.)};layer.Invoke("lineStyle",routeStroke);
+ bool previous=false;
+ for(std::size_t i=0;i<route.size();++i){
+  float x{},y{},z{};if(!camera->WorldPtToScreenPt3(point(route[i]+scape::Vec{0,0,5}),x,y,z,1e-5f)||x<0||x>1||y<0||y>1){previous=false;continue;}
+  x=rect.left+x*(rect.right-rect.left);y=rect.top+(1-y)*(rect.bottom-rect.top);
+  const std::array<RE::GFxValue,2> xy{RE::GFxValue(x),RE::GFxValue(y)};layer.Invoke(previous?"lineTo":"moveTo",xy);previous=true;
+  if(i+1==route.size()){
+   for(int corner=0;corner<=4;++corner){const float dx[4]={0,6,0,-6},dy[4]={-6,0,6,0};const std::array<RE::GFxValue,2> diamond{RE::GFxValue(x+dx[corner%4]),RE::GFxValue(y+dy[corner%4])};layer.Invoke(corner?"lineTo":"moveTo",diamond);}
+  }
+ }
 }
 void hud(RE::HUDMenu* self,float dt,std::uint32_t time){
  originalHud(self,dt,time);if(!self->uiMovie)return;
- Display data;ClickFeedback feedback;std::shared_ptr<const TerrainDisplay> terrain;{std::lock_guard lock(displayMutex);data=display;feedback=clickFeedback;terrain=terrainDisplay;}
+ Display data;ClickFeedback feedback;std::shared_ptr<const TerrainDisplay> terrain;std::vector<scape::Vec> route;{std::lock_guard lock(displayMutex);data=display;feedback=clickFeedback;terrain=terrainDisplay;route=displayedRoute;}
  RE::GFxValue root,clip;if(!self->uiMovie->GetVariable(&root,"_root"))return;
- drawTerrain(root,data.enabled&&data.overlay,terrain,self->uiMovie->GetVisibleFrameRect());
+ drawTerrain(root,data.enabled&&data.overlay,terrain,route,self->uiMovie->GetVisibleFrameRect());
  if(!root.GetMember("SkyrimScapePointer",&clip)||!clip.IsDisplayObject())if(!root.CreateEmptyMovieClip(&clip,"SkyrimScapePointer",16000))return;
  RE::GFxValue marker;
  if(!root.GetMember("SkyrimScapeClick",&marker)||!marker.IsDisplayObject())root.CreateEmptyMovieClip(&marker,"SkyrimScapeClick",15999);
@@ -431,6 +445,6 @@ SKSEPluginLoad(const SKSE::LoadInterface* skse){
  SKSE::Init(skse);auto directory=SKSE::log::log_directory();if(!directory)return false;
  auto log=spdlog::basic_logger_mt("SkyrimScape",(*directory/"SkyrimScape.log").string(),true);
  spdlog::set_default_logger(log);spdlog::flush_on(spdlog::level::info);
- spdlog::info("SkyrimScape experimental 0.2.6 loaded on {}",skse->RuntimeVersion().string());
+ spdlog::info("SkyrimScape experimental 0.2.7 loaded on {}",skse->RuntimeVersion().string());
  return SKSE::GetMessagingInterface()->RegisterListener(message);
 }
