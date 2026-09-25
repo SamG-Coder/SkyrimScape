@@ -7,6 +7,8 @@
 namespace scape::grid {
 constexpr float spacing=32.f,radius=20.f;
 constexpr int groupSize=16;
+// Conservative game-unit walking limits, independent of the grid spacing.
+constexpr float stepHeight=24.f,maxSlopeCosine=.70710678f;
 struct Cell {int x{},y{};Vec position;};
 struct Group {std::uint64_t signature{};std::vector<Cell> cells;};
 struct Stats {std::size_t groups{},reused{},built{},cells{},expanded{},clearanceChecks{};};
@@ -30,6 +32,18 @@ class World {
   std::vector<std::size_t> parent;std::vector<nav::Traversal> actions;
  };
  std::optional<Search> search;
+ bool walkSurface(const nav::Triangle& t)const{
+  auto a=t.vertices[1]-t.vertices[0],b=t.vertices[2]-t.vertices[0];
+  Vec n{a.y*b.z-a.z*b.y,a.z*b.x-a.x*b.z,a.x*b.y-a.y*b.x};
+  return n.length()>1e-3f&&std::abs(n.z)/n.length()>=maxSlopeCosine-1e-5f;
+ }
+ std::optional<Vec> groundAt(Vec hint,float tolerance)const{
+  auto found=sources.find(key(groupCoordinate(coordinate(hint.x)),groupCoordinate(coordinate(hint.y))));if(found==sources.end())return {};
+  std::optional<Vec> best;float error=tolerance;
+  for(auto index:found->second){const auto& t=mesh[index];auto p=nav::verticalPoint(hint,t);float dz=std::abs(p.z-hint.z);
+   if(dz<=error&&(nav::closest(p,t)-p).length()<1.f){error=dz;best=p;}
+  }return best;
+ }
  bool supportAt(float x,float y,float z)const{
   auto found=sources.find(key(groupCoordinate(coordinate(x)),groupCoordinate(coordinate(y))));if(found==sources.end())return false;
   for(auto index:found->second){
@@ -69,7 +83,7 @@ public:
   auto previousGroups=groups.size();abandon();mesh=std::move(input);sources.clear();stats={};
   int gx0=groupCoordinate(coordinate(focus.x-range)),gx1=groupCoordinate(coordinate(focus.x+range));
   int gy0=groupCoordinate(coordinate(focus.y-range)),gy1=groupCoordinate(coordinate(focus.y+range));
-  for(std::size_t i=0;i<mesh.size();++i){auto& t=mesh[i];if(!nav::walkable(t))continue;
+  for(std::size_t i=0;i<mesh.size();++i){auto& t=mesh[i];if(!walkSurface(t))continue;
    float minX=t.vertices[0].x,maxX=minX,minY=t.vertices[0].y,maxY=minY;
    for(auto p:t.vertices){minX=(std::min)(minX,p.x);maxX=(std::max)(maxX,p.x);minY=(std::min)(minY,p.y);maxY=(std::max)(maxY,p.y);}
    for(int x=(std::max)(gx0,groupCoordinate(coordinate(minX)));x<=(std::min)(gx1,groupCoordinate(coordinate(maxX)));++x)
@@ -103,10 +117,27 @@ public:
  const Stats& statistics()const{return stats;}
  std::vector<Cell> supportedCells(){std::vector<Cell> result;for(std::size_t i=0;i<cells.size();++i)if(clearCell(i))result.push_back(cells[i]);return result;}
  using Validator=std::function<bool(Vec,Vec,nav::Traversal)>;
+ std::vector<Vec> walkProfile(Vec a,Vec b)const{
+  std::vector<Vec> profile;auto first=groundAt(a,32.f);if(!first||!footprint(*first))return {};
+  profile.push_back(*first);int steps=(std::max)(1,static_cast<int>(std::ceil(planarDistance(a,b)/8.f)));
+  for(int i=1;i<=steps;++i){auto xy=a+(b-a)*(static_cast<float>(i)/steps);xy.z=profile.back().z;
+   auto ground=groundAt(xy,stepHeight+.5f);
+   if(!ground||!footprint(*ground))return {};
+   profile.push_back(*ground);
+  }
+  if(std::abs(profile.back().z-b.z)>12.f)return {};
+  return profile;
+ }
  bool canWalk(Vec a,Vec b,const Validator& validate)const{
-  int steps=static_cast<int>(std::ceil((b-a).length()/12.f));
-  for(int i=0;i<=steps;++i)if(!footprint(a+(b-a)*(static_cast<float>(i)/(std::max)(1,steps))))return false;
-  return validate(a,b,nav::Traversal::walk);
+  auto profile=walkProfile(a,b);if(profile.empty())return false;
+  // Follow the actual floor instead of tracing through the inside of a hill.
+  // Bound collision segments to 32 units while retaining every step transition.
+  std::size_t from=0;
+  for(std::size_t i=1;i<profile.size();++i){
+   bool riser=std::abs(profile[i].z-profile[i-1].z)>planarDistance(profile[i],profile[i-1])+1.f;
+   if(riser&&i>from+1){if(!validate(profile[from],profile[i-1],nav::Traversal::walk))return false;from=i-1;}
+   if(riser||i-from>=4||i+1==profile.size()){if(!validate(profile[from],profile[i],nav::Traversal::walk))return false;from=i;}
+  }return true;
  }
  Result plan(Vec start,Vec finish,const Validator& validate,float maxDrop,float goalRadius=0,
              std::size_t sliceExpansions=24000,std::chrono::milliseconds sliceTime=(std::chrono::milliseconds::max)(),
@@ -119,12 +150,10 @@ public:
   auto from=nearest(start,64.f,80.f),to=nearest(finish,48.f,80.f);
   if(!from){result.reason="start-has-no-radius-clear-cell";return result;}
   if(!to&&goalRadius==0){result.reason="destination-has-no-radius-clear-cell";return result;}
-  if(std::abs(start.z-cells[*from].position.z)>32.f||!validate(start,cells[*from].position,nav::Traversal::walk)){result.reason="start-to-grid-blocked";return result;}
-  if(goalRadius==0&&(!footprint(finish)||std::abs(finish.z-cells[*to].position.z)>32.f||!validate(cells[*to].position,finish,nav::Traversal::walk))){result.reason="grid-to-destination-blocked";return result;}
+  if(!canWalk(start,cells[*from].position,validate)){result.reason="start-to-grid-blocked";return result;}
+  if(goalRadius==0&&!canWalk(cells[*to].position,finish,validate)){result.reason="grid-to-destination-blocked";return result;}
   if(goalRadius==0){
-   bool supported=true;int steps=static_cast<int>(std::ceil((finish-start).length()/12.f));
-   for(int i=0;i<=steps;++i){auto at=start+(finish-start)*(static_cast<float>(i)/(std::max)(1,steps));if(!footprint(at)){supported=false;break;}}
-   if(supported&&validate(start,finish,nav::Traversal::walk)){
+   if(canWalk(start,finish,validate)){
     result.route.points={start,finish};result.route.traversal={nav::Traversal::walk,nav::Traversal::walk};result.reason="direct-walk";return result;
    }
   }
@@ -138,7 +167,7 @@ public:
   auto from=s.from;auto to=s.to;finish=s.finish;start=s.start;std::size_t sliceCount=0;
   auto canEdge=[&](std::size_t a,std::size_t b,nav::Traversal type){
    auto id=(static_cast<std::uint64_t>(a)<<32)|b;auto found=edges.find(id);if(found!=edges.end())return found->second;
-   result.stats.clearanceChecks=++s.checks;return edges[id]=validate(cells[a].position,cells[b].position,type);
+   result.stats.clearanceChecks=++s.checks;return edges[id]=type==nav::Traversal::walk?canWalk(cells[a].position,cells[b].position,validate):validate(cells[a].position,cells[b].position,type);
   };
   while(!queue.empty()&&s.expanded<24000){
    if(sliceCount>=sliceExpansions||(sliceCount>0&&sliceTime!=(std::chrono::milliseconds::max)()&&std::chrono::steady_clock::now()-started>=sliceTime)){
@@ -157,13 +186,12 @@ public:
      std::size_t end=(std::min)(i+16,result.route.points.size()-1),next=i+1;
      for(auto j=i+1;j<=end;++j)if(result.route.traversal[j]!=nav::Traversal::walk){end=j-1;break;}
      for(auto j=end;j>i+1;--j){
-      Vec a=result.route.points[i],b=result.route.points[j];int steps=static_cast<int>(std::ceil((b-a).length()/12.f));bool supported=true;
-      for(int s=1;s<steps;++s){auto p=a+(b-a)*(static_cast<float>(s)/steps);if(!footprint(p)){supported=false;break;}}
-      if(supported&&validate(a,b,nav::Traversal::walk)){next=j;break;}
+      Vec a=result.route.points[i],b=result.route.points[j];
+      if(canWalk(a,b,validate)){next=j;break;}
      }
      smooth.points.push_back(result.route.points[next]);smooth.traversal.push_back(result.route.traversal[next]);i=next;
     }
-    if(goalRadius==0&&planarDistance(smooth.points.back(),finish)<48.f&&std::abs(smooth.points.back().z-finish.z)<32.f&&validate(smooth.points.back(),finish,nav::Traversal::walk)){smooth.points.push_back(finish);smooth.traversal.push_back(nav::Traversal::walk);}
+    if(goalRadius==0&&planarDistance(smooth.points.back(),finish)<48.f&&canWalk(smooth.points.back(),finish,validate)){smooth.points.push_back(finish);smooth.traversal.push_back(nav::Traversal::walk);}
     smooth.expanded=result.stats.expanded;result.route=std::move(smooth);result.reason="accepted";abandon();return result;
    }
    const auto& cell=cells[current.i];
@@ -174,7 +202,7 @@ public:
      auto found=columns.find(key(cell.x+dx*stride,cell.y+dy*stride));if(found==columns.end())continue;
      for(auto next:found->second){auto a=cell.position,b=cells[next].position;float dz=b.z-a.z;
       nav::Traversal action=nav::Traversal::walk;
-      if(stride>1||std::abs(dz)>32.f){action=dz < -20?nav::Traversal::drop:nav::Traversal::jump;if(!nav::traversable(a,b,action,maxDrop))continue;}
+      if(stride>1||walkProfile(a,b).empty()){action=dz < -stepHeight?nav::Traversal::drop:nav::Traversal::jump;if(!nav::traversable(a,b,action,maxDrop))continue;}
       if(!clearCell(next))continue;
       if(action==nav::Traversal::walk&&dx&&dy){if(!nearest({a.x+dx*spacing,a.y,a.z},4.f,40.f)||!nearest({a.x,a.y+dy*spacing,a.z},4.f,40.f))continue;}
       if(!canEdge(current.i,next,action))continue;

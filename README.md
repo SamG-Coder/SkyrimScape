@@ -2,7 +2,9 @@
 
 An experimental SKSE plugin that turns Skyrim Special Edition into a RuneScape-style click adventure, with an elevated orbit camera, click-to-walk, interactions and hostile-target melee orders.
 
-**Version 0.3.8. Windows x64 Skyrim runtime 1.7.104.0 only.** The plugin refuses other runtimes. This is a source repository, not a complete mod-manager-ready release.
+**Version 0.3.9. Windows x64 Skyrim runtime 1.7.104.0 only.** The plugin refuses other runtimes. This is a source repository, not a complete mod-manager-ready release.
+
+Version 0.3.9 samples floor profiles every eight horizontal units for walking. Conservative explicit limits are 24-unit steps and 45-degree slopes; these are planner defaults, not values extracted from the native character controller. Collision segments follow the sampled floor, with lengths bounded to 32 horizontal units and step transitions kept separate. Routing, smoothing and look-ahead share this check. Small stairs remain walks; tall risers and unsupported gaps require separate validated traversal actions. Loaded navigation surfaces are still required, so arbitrary unmeshed geometry is not discovered by this change.
 
 Version 0.3.8 preserves the active walk for ground clicks within 60 degrees of current travel. Replacement searches keep a stable origin while movement continues; completed routes require a clearance-checked join from the moving player. Failed replacements retain the old route. Movement stops at the old validated endpoint if the replacement is still pending. A bounded look-ahead skips walking waypoints only when terrain support and collision checks pass, and preserves jump/drop transitions. Unchanged grid geometry retains columns and cached footprint results. The native centre crosshair is hidden in F8 gameplay and its previous enabled setting is restored when leaving the mode.
 

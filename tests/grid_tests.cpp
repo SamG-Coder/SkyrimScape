@@ -22,7 +22,7 @@ int main(){
  require(planarDistance(approach.route.points.back(),{400,240,0})<=80&&planarDistance(approach.route.points.back(),{400,240,0})>30,"Approach must stop within reach outside actor collider");
  auto visibleApproach=world.plan({64,240,0},{400,240,0},actorBlocks,180,80,24000,(std::chrono::milliseconds::max)(),[](Vec p){return p.y>280;});
  require(!visibleApproach.route.points.empty()&&visibleApproach.route.points.back().y>280,"Approach must search past cells without target visibility");
- auto shortEdges=[](Vec a,Vec b,nav::Traversal){return (b-a).length()<60.f;};
+ auto shortEdges=[](Vec a,Vec b,nav::Traversal){return !((std::min)(a.x,b.x)<256.f&&(std::max)(a.x,b.x)>192.f&&(std::min)(a.y,b.y)<384.f);};
  auto sliced=world.plan({64,64,0},{448,448,0},shortEdges,180,0,1);
  require(sliced.pending&&sliced.stats.expanded==1,"Search must yield at the per-frame expansion budget");
  std::size_t frames=1,expanded=sliced.stats.expanded;
@@ -60,5 +60,25 @@ int main(){
  require(blocked.route.points.empty(),"Physics rejection must prevent a proposed traversal");
  std::vector<nav::Triangle> stacked;rectangle(stacked,0,0,256,256,0);rectangle(stacked,0,0,256,256,300);world.update(stacked,{128,128,0},600);
  require(world.plan({64,64,0},{192,192,300},clear,180).route.points.empty(),"Height layers must not connect through a ceiling");
- std::cout<<"PASS: grid routing, any-angle smoothing, group caching, circular clearance, directed drops and height layers\n";
+ std::vector<nav::Triangle> stairs;
+ for(int i=0;i<10;++i)rectangle(stairs,i*48.f,0,48,256,i*16.f);
+ world.update(stairs,{240,128,64},600);
+ auto steps=world.plan({64,128,16},{416,128,128},clear,180);
+ require(!steps.route.points.empty(),"Small staircase risers must form a walking route");
+ require(std::all_of(steps.route.traversal.begin(),steps.route.traversal.end(),[](auto t){return t==nav::Traversal::walk;}),"Steps within the walking limit must not generate jumps");
+ require(world.canWalk({416,128,128},{64,128,16},clear),"Small stairs must also be walkable downhill");
+ std::vector<nav::Triangle> tall;rectangle(tall,0,0,256,256,0);rectangle(tall,256,0,256,256,48);world.update(tall,{256,128,0},600);
+ require(!world.canWalk({128,128,0},{384,128,48},clear),"A tall riser must not be smoothed into a walk");
+ std::vector<nav::Triangle> ramp;rectangle(ramp,0,0,512,256,0);
+ for(auto& t:ramp)for(auto& v:t.vertices)v.z=v.x*.8f;
+ world.update(ramp,{256,128,200},600);
+ require(world.canWalk({64,128,51.2f},{448,128,358.4f},clear),"Walkable ramps must follow their floor heights");
+ for(auto& t:ramp)for(auto& v:t.vertices)v.z=v.x*1.5f;
+ world.update(ramp,{256,128,300},600);
+ require(!world.canWalk({64,128,96},{448,128,672},clear),"Slopes above 45 degrees must not be treated as ramps");
+ std::vector<nav::Triangle> crest;rectangle(crest,0,0,256,256,0);rectangle(crest,256,0,256,256,0);
+ for(auto& t:crest)for(auto& v:t.vertices)v.z=(v.x<=256?v.x:512-v.x)*.5f;
+ world.update(crest,{256,128,128},600);
+ require(world.canWalk({64,128,32},{448,128,32},clear),"A walkable crest must sample the ground rather than a line through the hill");
+ std::cout<<"PASS: grid routing, ramps, stairs, slope limits, caching, clearance, directed drops and height layers\n";
 }
