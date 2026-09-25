@@ -53,3 +53,8 @@ The 0.3.1 playtest log at 12:35 contains repeated `grid-to-destination-blocked` 
 Changes: smooth with the actual start included; search for an 80-unit target approach region with visibility checks; retain action orders through failed/pending chase plans; resume A-star state across input updates with a soft 4 ms / 128-expansion slice; invalidate dynamic edge results for each new search; split F7 outlines into 256-cell shapes and add drawing/snapshot diagnostics. The old log does not establish the exact cause of intermittent F7 disappearance, so the rendering change remains a candidate fix pending user playtest.
 
 Regression coverage adds backward-anchor avoidance, occupied-target approach, target visibility, incremental search completion, pending-search replacement and dynamic collision invalidation. Native gameplay and overlay behavior for this build remain unverified until the user plays it.
+
+
+## 0.3.3 combat text
+
+Added a bounded pool of 48 floating labels, using nearby actor health deltas and TESHitEvent kHitBlocked. Gold/red distinguish other actors/player, cyan marks BLOCK. Text fades after 1.25 seconds and clears when leaving gameplay or loading a save. No attack-input damage estimates or invented blocked amounts. Native build succeeds; existing regression suites remain required. Visual placement, font availability, blocked-event timing and displayed health deltas need user gameplay validation.

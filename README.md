@@ -2,7 +2,7 @@
 
 An experimental SKSE plugin that turns Skyrim Special Edition into a RuneScape-style click adventure, with an elevated orbit camera, click-to-walk, interactions and hostile-target melee orders.
 
-**Version 0.3.2. Windows x64 Skyrim runtime 1.7.104.0 only.** The plugin refuses other runtimes. This is a source repository, not a complete mod-manager-ready release.
+**Version 0.3.3. Windows x64 Skyrim runtime 1.7.104.0 only.** The plugin refuses other runtimes. This is a source repository, not a complete mod-manager-ready release.
 
 ## Features
 
@@ -11,6 +11,7 @@ An experimental SKSE plugin that turns Skyrim Special Edition into a RuneScape-s
 - Ground-click projection that preserves slopes and separate floor heights.
 - Experimental jump/drop transitions between grid cells, with landing and clearance checks.
 - Click-to-approach interactions and hostile-target melee input, with line-of-sight checks.
+- Floating health-loss numbers over nearby actors (gold) and the player (red), plus blue BLOCK indicators from native blocked-hit events. Available in F8 mode independently of F7.
 - Terrain grid overlay, route drawing, click diagnostics and offline route replay.
 
 Completed walks, corrected facing, the camera and the terrain overlay have been observed in live playtests. **Combat, calculated drops, jump execution and all interaction cases remain unverified end to end.** See [VERIFICATION.md](VERIFICATION.md) for detailed evidence and remaining checks.
@@ -105,3 +106,5 @@ Logs and accepted/rejected route CSVs are saved beside SKSE logs under Skyrim's 
 Original SkyrimScape code is **GPL-3.0-or-later**; see [LICENSE](LICENSE). [CommonLibSSE-NG](https://github.com/alandtse/CommonLibSSE-NG), SKSE and other dependencies retain their own licenses. No Bethesda executables, game assets, saves, local logs or runtime binaries are distributed here.
 
 SkyrimScape is an independent experimental project, not affiliated with Bethesda or Jagex.
+
+Combat numbers use observed health loss, including mitigation and other health-draining effects. Multiple hits between updates are combined; they are not attributed to a particular attacker. Healing does not produce damage numbers. Actors are sampled within 3000 units; newly observed actors establish a baseline first. BLOCK indicates a blocked hit, not a fabricated prevented-damage amount. Text rendering and event timing still require a live playtest.

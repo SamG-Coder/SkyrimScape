@@ -6,6 +6,7 @@
 #include "control_math.hpp"
 #include "native_navigation.hpp"
 #include "terrain_overlay.hpp"
+#include "combat_text.hpp"
 namespace {
 using Clock=std::chrono::steady_clock;
 scape::Vec vec(RE::NiPoint3 p){return {p.x,p.y,p.z};}
@@ -343,6 +344,7 @@ RE::BSEventNotifyControl input(RE::PlayerControls* c,RE::InputEvent* const* even
  }
  *tail=nullptr;
  if(!active){cancel(c);state.middle=false;}
+ combat_text::update(active);
  auto result=originalInput(c,&head,source);
  for(auto [e,next]:links)e->next=next;
  if(active){
@@ -450,6 +452,8 @@ void hud(RE::HUDMenu* self,float dt,std::uint32_t time){
  Display data;ClickFeedback feedback;std::shared_ptr<const TerrainDisplay> terrain;std::vector<scape::Vec> route;{std::lock_guard lock(displayMutex);data=display;feedback=clickFeedback;terrain=terrainDisplay;route=displayedRoute;}
  RE::GFxValue root,clip;if(!self->uiMovie->GetVariable(&root,"_root"))return;
  drawTerrain(root,data.enabled&&data.overlay,terrain,route,self->uiMovie->GetVisibleFrameRect());
+ auto combatCamera=RE::PlayerCamera::GetSingleton();
+ combat_text::draw(root,combatCamera?findCamera(combatCamera->cameraRoot.get()):nullptr,self->uiMovie->GetVisibleFrameRect(),data.enabled);
  if(!root.GetMember("SkyrimScapePointer",&clip)||!clip.IsDisplayObject())if(!root.CreateEmptyMovieClip(&clip,"SkyrimScapePointer",16000))return;
  RE::GFxValue marker;
  if(!root.GetMember("SkyrimScapeClick",&marker)||!marker.IsDisplayObject())root.CreateEmptyMovieClip(&marker,"SkyrimScapeClick",15999);
@@ -477,13 +481,14 @@ void hud(RE::HUDMenu* self,float dt,std::uint32_t time){
 }
 void message(SKSE::MessagingInterface::Message* e){
  if(e->type==SKSE::MessagingInterface::kDataLoaded){
+  RE::ScriptEventSourceHolder::GetSingleton()->AddEventSink<RE::TESHitEvent>(&combat_text::hits);
   REL::Relocation<std::uintptr_t> controls{RE::VTABLE_PlayerControls[0]};originalInput=controls.write_vfunc(1,input);
   REL::Relocation<std::uintptr_t> camera{RE::VTABLE_ThirdPersonState[0]};originalRotation=camera.write_vfunc(4,rotation);originalTranslation=camera.write_vfunc(5,translation);
   originalCameraUpdate=camera.write_vfunc(3,cameraUpdate);
   REL::Relocation<std::uintptr_t> menu{RE::VTABLE_HUDMenu[0]};originalHud=menu.write_vfunc(5,hud);
   spdlog::info("Input, camera and HUD hooks installed; F8 enables prototype");
  }
- if(e->type==SKSE::MessagingInterface::kPreLoadGame||e->type==SKSE::MessagingInterface::kNewGame){cancel(RE::PlayerControls::GetSingleton());state.enabled=false;state.middle=false;}
+ if(e->type==SKSE::MessagingInterface::kPreLoadGame||e->type==SKSE::MessagingInterface::kNewGame){combat_text::update(false);cancel(RE::PlayerControls::GetSingleton());state.enabled=false;state.middle=false;}
 }
 }
 SKSEPluginLoad(const SKSE::LoadInterface* skse){
@@ -491,6 +496,6 @@ SKSEPluginLoad(const SKSE::LoadInterface* skse){
  SKSE::Init(skse);auto directory=SKSE::log::log_directory();if(!directory)return false;
  auto log=spdlog::basic_logger_mt("SkyrimScape",(*directory/"SkyrimScape.log").string(),true);
  spdlog::set_default_logger(log);spdlog::flush_on(spdlog::level::info);
- spdlog::info("SkyrimScape experimental 0.3.2 loaded on {}",skse->RuntimeVersion().string());
+ spdlog::info("SkyrimScape experimental 0.3.3 loaded on {}",skse->RuntimeVersion().string());
  return SKSE::GetMessagingInterface()->RegisterListener(message);
 }
