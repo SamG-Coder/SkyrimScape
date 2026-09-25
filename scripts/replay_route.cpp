@@ -1,5 +1,6 @@
 #include "navigation.hpp"
 #include "terrain_links.hpp"
+#include "grid_navigation.hpp"
 #include <chrono>
 #include <fstream>
 #include <iostream>
@@ -29,6 +30,12 @@ int main(int argc,char** argv){
  }
  if(!request||mesh.empty()){std::cerr<<"Missing request or mesh\n";return 2;}
  if(argc==3){
+  if(std::string(argv[2])=="--grid"){
+   auto began=std::chrono::steady_clock::now();scape::grid::World grid;grid.update(mesh,start);
+   auto updated=std::chrono::steady_clock::now();auto result=grid.plan(start,finish,[](scape::Vec,scape::Vec,scape::nav::Traversal){return true;},450.f);
+   auto planned=std::chrono::steady_clock::now();grid.update(mesh,start);auto reused=std::chrono::steady_clock::now();
+   std::cout<<"GRID geometry only: "<<result.reason<<", "<<result.stats.cells<<" cells, "<<result.stats.groups<<" groups, "<<result.stats.expanded<<" expanded, "<<result.route.points.size()<<" points; build "<<std::chrono::duration<double,std::milli>(updated-began).count()<<"ms, plan "<<std::chrono::duration<double,std::milli>(planned-updated).count()<<"ms, cached refresh "<<std::chrono::duration<double,std::milli>(reused-planned).count()<<"ms, "<<grid.statistics().reused<<" reused groups\n";return 0;
+  }
   if(std::string(argv[2])!="--terrain")return 2;
   auto began=std::chrono::steady_clock::now();std::size_t probes=0;
   auto generated=scape::nav::addTerrainLinks(mesh,start,2200.f,450.f,[&](scape::Vec,scape::Vec,scape::nav::Traversal){++probes;return true;});

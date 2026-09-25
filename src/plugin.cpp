@@ -35,7 +35,7 @@ struct State{
  Clock::time_point nextTerrainCheck{},nextJump{};
 }state;
 struct Display{bool enabled{};float x{.5f},y{.5f};bool overlay{};}display;
-struct TerrainDisplay{std::vector<scape::nav::Triangle> mesh;std::vector<unsigned char> reachable;};
+struct TerrainDisplay{std::vector<scape::nav::Triangle> mesh;std::vector<unsigned char> reachable;std::vector<scape::grid::Cell> cells;};
 std::shared_ptr<const TerrainDisplay> terrainDisplay;
 std::vector<scape::Vec> displayedRoute;
 struct ClickFeedback{float x{},y{};bool action{};Clock::time_point when{};}clickFeedback;
@@ -64,7 +64,7 @@ void cancel(RE::PlayerControls* c){
  state.traversal.clear();state.activeTraversal=(std::numeric_limits<std::size_t>::max)();
 }
 struct Hit{bool valid{};scape::Vec position;RE::TESObjectREFR* reference{};float normalZ{};};
-Hit cast(RE::NiPoint3 start,RE::NiPoint3 end){
+Hit cast(RE::NiPoint3 start,RE::NiPoint3 end,bool logIgnored=false){
  auto p=RE::PlayerCharacter::GetSingleton();auto cell=p?p->GetParentCell():nullptr;auto world=cell?cell->GetbhkWorld():nullptr;
  if(!world)return {};
  RE::bhkPickData pick{};const float scale=RE::bhkWorld::GetWorldScale();
@@ -73,10 +73,37 @@ Hit cast(RE::NiPoint3 start,RE::NiPoint3 end){
  if(auto controller=p->GetCharController())pick.rayInput.filterInfo.SetSystemGroup(controller->collisionFilterGroup);
  RE::BSReadLockGuard lock(world->worldLock);
  world->PickObject(pick);if(!pick.rayOutput.HasHit())return {};
+ auto ignored=[p](RE::TESObjectREFR* ref){
+  // Skyrim.esm 0002F245 is FXcameraAttachEffectsACT. Its invisible volume
+  // was intercepting dozens of unrelated clicks and also clearance rays.
+  return ref&&(ref==p||(ref->GetBaseObject()&&ref->GetBaseObject()->GetFormID()==0x0002F245));
+ };
+ auto firstRef=RE::TESHavokUtilities::FindCollidableRef(*pick.rayOutput.rootCollidable);
+ if(ignored(firstRef)){
+  RE::hkpAllRayHitCollector collector;RE::bhkPickData all{};all.rayInput=pick.rayInput;all.allRayHitCollector=&collector;world->PickObject(all);
+  const RE::hkpWorldRayCastOutput* nearest=nullptr;
+  for(const auto& hit:collector.hits){
+   if(!hit.HasHit()||!hit.rootCollidable)continue;
+   if(ignored(RE::TESHavokUtilities::FindCollidableRef(*hit.rootCollidable)))continue;
+   if(!nearest||hit.hitFraction<nearest->hitFraction)nearest=&hit;
+  }
+  if(logIgnored)spdlog::info("PICK skipped invisible camera/self reference {:08X}; remaining hit={}",firstRef->GetFormID(),nearest!=nullptr);
+  if(!nearest)return {};pick.rayOutput=*nearest;
+ }
  alignas(16) float normal[4];_mm_store_ps(normal,pick.rayOutput.normal.quad);
  return {true,vec(start+(end-start)*pick.rayOutput.hitFraction),RE::TESHavokUtilities::FindCollidableRef(*pick.rayOutput.rootCollidable),normal[2]};
 }
 bool clearTraversal(scape::Vec takeoff,scape::Vec landing,scape::nav::Traversal type){
+ if(type==scape::nav::Traversal::walk){
+  auto delta=landing-takeoff;float horizontal=std::hypot(delta.x,delta.y);
+  if(horizontal<1.f)return std::abs(delta.z)<35.f;
+  auto side=scape::Vec{-delta.y/horizontal,delta.x/horizontal,0}*scape::grid::radius;
+  for(float offset:{-1.f,0.f,1.f})for(float height:{45.f,110.f}){
+   auto a=takeoff+side*offset+scape::Vec{0,0,height},b=landing+side*offset+scape::Vec{0,0,height};
+   if(cast(point(a),point(b)).valid)return false;
+  }
+  return true;
+ }
  float maxDrop=180.f;
  if(auto settings=RE::GameSettingCollection::GetSingleton())if(auto setting=settings->GetSetting("fJumpFallHeightMin")){
   auto threshold=setting->GetFloat();if(std::isfinite(threshold)&&threshold>=40.f)maxDrop=(std::min)(512.f,threshold*.75f);
@@ -112,11 +139,12 @@ RE::NiCamera* findCamera(RE::NiAVObject* o){
 bool planRoute(scape::Vec position){
  auto started=Clock::now();
  auto route=native_navigation::plan(position,state.destination,state.order==Order::walk,clearTraversal);
- if(route.points.empty()){spdlog::info("No connected loaded navmesh route to destination");return false;}
+ if(route.points.empty()){spdlog::info("No usable grid route to destination; see preceding GRID reason");return false;}
  state.route=std::move(route.points);state.waypoint=0;state.plannedTarget=state.destination;
  state.traversal=std::move(route.traversal);state.activeTraversal=(std::numeric_limits<std::size_t>::max)();
  state.nextPlan=Clock::now()+std::chrono::milliseconds(750);
- spdlog::info("Planned {} waypoints, expanded {} triangles in {:.2f} ms",state.route.size(),route.expanded,std::chrono::duration<double,std::milli>(Clock::now()-started).count());
+ spdlog::info("Planned {} waypoints, expanded {} grid cells in {:.2f} ms",state.route.size(),route.expanded,std::chrono::duration<double,std::milli>(Clock::now()-started).count());
+ for(std::size_t i=0;i<state.route.size();++i){auto p=state.route[i];spdlog::info("ROUTE point {} type={} position {:.2f} {:.2f} {:.2f}",i,static_cast<int>(state.traversal[i]),p.x,p.y,p.z);}
  return true;
 }
 float orderRange(){return state.order==Order::walk?24.f:state.order==Order::attack?110.f:130.f;}
@@ -125,10 +153,13 @@ bool actionInReach(RE::PlayerCharacter* player,RE::TESObjectREFR* target){
  bool unused=false;return player->HasLineOfSight(target,unused);
 }
 void click(){
+ static std::uint64_t clickSequence=0;auto sequence=++clickSequence;
+ spdlog::info("CLICK {} received screen {:.4f} {:.4f}",sequence,state.cursorX,state.cursorY);
  auto pc=RE::PlayerCamera::GetSingleton();auto camera=pc?findCamera(pc->cameraRoot.get()):nullptr;if(!camera)return;
  RE::NiPoint3 start,direction;
  if(!camera->WindowPointToRay(static_cast<int>(state.cursorX*10000),static_cast<int>(state.cursorY*10000),start,direction,10000,10000)){rejectedClick();return;}
- auto hit=cast(start,start+direction*12000.f);auto p=RE::PlayerCharacter::GetSingleton();
+ auto hit=cast(start,start+direction*12000.f,true);auto p=RE::PlayerCharacter::GetSingleton();
+ spdlog::info("CLICK {} ray valid={} ref={:08X} collision {:.2f} {:.2f} {:.2f} normalZ={:.3f}",sequence,hit.valid,hit.reference?hit.reference->GetFormID():0,hit.position.x,hit.position.y,hit.position.z,hit.normalZ);
  if(!hit.valid||hit.reference==p){rejectedClick();return;}
  cancel(RE::PlayerControls::GetSingleton());state.destination=hit.position;state.order=Order::walk;
  if(hit.reference&&hit.reference->GetBaseObject()){
@@ -296,8 +327,7 @@ RE::BSEventNotifyControl input(RE::PlayerControls* c,RE::InputEvent* const* even
  if(active){
   c->data.lookInputVec={0,0};tick(c);
   if(state.overlay&&Clock::now()>=state.nextOverlay){
-   auto terrain=std::make_shared<TerrainDisplay>();terrain->mesh=native_navigation::validatedSnapshot(clearTraversal);
-   terrain->reachable=scape::nav::reachability(terrain->mesh,vec(RE::PlayerCharacter::GetSingleton()->GetPosition()));
+   auto terrain=std::make_shared<TerrainDisplay>();terrain->cells=native_navigation::refreshGrid().grid.supportedCells();
    {std::lock_guard lock(displayMutex);terrainDisplay=std::move(terrain);}
    state.nextOverlay=Clock::now()+std::chrono::seconds(2);
   }
@@ -350,7 +380,7 @@ void drawTerrain(RE::GFxValue& root,bool visible,const std::shared_ptr<const Ter
   const std::array<RE::GFxValue,6> args{RE::GFxValue("SkyrimScapeTerrainLegend"),RE::GFxValue(15998.),RE::GFxValue(14.),RE::GFxValue(45.),RE::GFxValue(760.),RE::GFxValue(64.)};
   root.Invoke("createTextField",args);root.GetMember("SkyrimScapeTerrainLegend",&label);
   label.SetMember("embedFonts",RE::GFxValue(false));
-  label.SetMember("htmlText",RE::GFxValue("<font face='_sans' size='16' color='#FFFFFF'>F7: terrain overlay | <font color='#52ED88'>GREEN: walk route</font> | <font color='#53DFFF'>CYAN: jump/drop route</font><br/><font color='#FFD166'>GOLD ARROWS: calculated drops</font> | <font color='#FF765E'>ORANGE: disconnected</font> | X-ray view</font>"));
+  label.SetMember("htmlText",RE::GFxValue("<font face='_sans' size='16' color='#FFFFFF'>F7: GRID | 32-unit cells | 20-unit circular clearance<br/><font color='#52ED88'>GREEN: supported cells, not guaranteed routes</font> | WHITE: selected route | X-ray view</font>"));
   label.SetMember("selectable",RE::GFxValue(false));
  }
  RE::GFxValue::DisplayInfo info;info.SetVisible(visible);
@@ -358,6 +388,15 @@ void drawTerrain(RE::GFxValue& root,bool visible,const std::shared_ptr<const Ter
  if(!layer.IsDisplayObject())return;layer.SetDisplayInfo(info);if(!visible||!terrain)return;
  static Clock::time_point nextDraw{};if(Clock::now()<nextDraw)return;nextDraw=Clock::now()+std::chrono::milliseconds(66);
  layer.Invoke("clear");auto pc=RE::PlayerCamera::GetSingleton();auto camera=pc?findCamera(pc->cameraRoot.get()):nullptr;if(!camera)return;
+ for(const auto& cell:terrain->cells){
+  std::vector<scape::nav::ScreenPoint> polygon;bool valid=true;
+  for(auto offset:{scape::Vec{-14,-14,2},scape::Vec{14,-14,2},scape::Vec{14,14,2},scape::Vec{-14,14,2}}){
+   float x{},y{},z{};if(!camera->WorldPtToScreenPt3(point(cell.position+offset),x,y,z,1e-5f)){valid=false;break;}polygon.push_back({x,1-y});
+  }
+  if(!valid)continue;polygon=scape::nav::clipScreen(std::move(polygon));if(polygon.size()<3)continue;
+  const std::array<RE::GFxValue,3> stroke{RE::GFxValue(.65),RE::GFxValue(5434760.),RE::GFxValue(50.)};layer.Invoke("lineStyle",stroke);
+  for(std::size_t i=0;i<=polygon.size();++i){auto p=polygon[i%polygon.size()];const std::array<RE::GFxValue,2> xy{RE::GFxValue(rect.left+p.x*(rect.right-rect.left)),RE::GFxValue(rect.top+p.y*(rect.bottom-rect.top))};layer.Invoke(i?"lineTo":"moveTo",xy);}
+ }
  for(std::size_t i=0;i<terrain->mesh.size();++i){
   std::vector<scape::nav::ScreenPoint> polygon;bool valid=true;
   for(auto vertex:terrain->mesh[i].vertices){
@@ -445,6 +484,6 @@ SKSEPluginLoad(const SKSE::LoadInterface* skse){
  SKSE::Init(skse);auto directory=SKSE::log::log_directory();if(!directory)return false;
  auto log=spdlog::basic_logger_mt("SkyrimScape",(*directory/"SkyrimScape.log").string(),true);
  spdlog::set_default_logger(log);spdlog::flush_on(spdlog::level::info);
- spdlog::info("SkyrimScape experimental 0.2.7 loaded on {}",skse->RuntimeVersion().string());
+ spdlog::info("SkyrimScape experimental 0.3.1 loaded on {}",skse->RuntimeVersion().string());
  return SKSE::GetMessagingInterface()->RegisterListener(message);
 }

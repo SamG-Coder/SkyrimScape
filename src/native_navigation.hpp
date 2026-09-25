@@ -2,6 +2,8 @@
 #include "navigation.hpp"
 #include "route_recorder.hpp"
 #include "terrain_links.hpp"
+#include "grid_navigation.hpp"
+#include <chrono>
 #include <functional>
 namespace native_navigation {
 inline scape::nav::Key key(RE::FormID mesh,std::uint16_t triangle){return (static_cast<std::uint64_t>(mesh)<<16)|triangle;}
@@ -59,25 +61,41 @@ inline std::vector<scape::nav::Triangle> validatedSnapshot(const std::function<b
  spdlog::info("Terrain connections: {} native, {} calculated drops, drop limit {:.1f}",links,generated,maxDrop);
  return mesh;
 }
+struct GridCache {
+ scape::grid::World grid;std::vector<scape::nav::Triangle> mesh;
+ std::chrono::steady_clock::time_point refreshed{};scape::Vec focus{};RE::FormID world{},cell{};
+};
+inline GridCache& gridCache(){static GridCache cache;return cache;}
+inline GridCache& refreshGrid(){
+ auto& cache=gridCache();auto p=RE::PlayerCharacter::GetSingleton();auto where=p->GetPosition();scape::Vec position{where.x,where.y,where.z};
+ auto world=p->GetWorldspace();auto cell=p->GetParentCell();RE::FormID wid=world?world->GetFormID():0,cid=cell?cell->GetFormID():0;
+ auto now=std::chrono::steady_clock::now();
+ bool changed=wid!=cache.world||(!wid&&cid!=cache.cell);
+ if(changed){cache.grid.clear();cache.mesh.clear();}
+ if(changed||cache.mesh.empty()||now-cache.refreshed>std::chrono::seconds(2)||scape::planarDistance(position,cache.focus)>256.f){
+  cache.mesh=snapshot();cache.grid.update(cache.mesh,position);cache.focus=position;cache.refreshed=now;cache.world=wid;cache.cell=cid;
+ }
+ return cache;
+}
 inline scape::nav::Route plan(scape::Vec start,scape::Vec finish,bool normalizeGround,
  const std::function<bool(scape::Vec,scape::Vec,scape::nav::Traversal)>& clearTraversal){
- auto mesh=validatedSnapshot(clearTraversal);
+ auto& cache=refreshGrid();auto& mesh=cache.mesh;
  if(normalizeGround){
   auto floor=scape::nav::surface(mesh,finish);
   if(!floor){spdlog::info("Ground click rejected: no walk surface within horizontal projection tolerance at {:.1f} {:.1f} {:.1f}",finish.x,finish.y,finish.z);return {};}
   if((floor->point-finish).length()>40.f)spdlog::info("Ground click projected onto surface: height {:.1f} -> {:.1f}",finish.z,floor->point.z);
   finish=floor->point;
  }
- auto route=scape::nav::plan(mesh,start,finish);
+ float maxDrop=180.f;
+ if(auto settings=RE::GameSettingCollection::GetSingleton())if(auto setting=settings->GetSetting("fJumpFallHeightMin")){float threshold=setting->GetFloat();if(std::isfinite(threshold)&&threshold>=40.f)maxDrop=(std::min)(512.f,threshold*.75f);}
+ auto result=cache.grid.plan(start,finish,clearTraversal,maxDrop);auto route=std::move(result.route);
+ spdlog::info("GRID result={} cells={} groups={} reused={} rebuilt={} expanded={} collisionChecks={} waypoints={}",result.reason,result.stats.cells,result.stats.groups,result.stats.reused,result.stats.built,result.stats.expanded,result.stats.clearanceChecks,route.points.size());
  if(route.points.empty()){
   auto from=scape::nav::locate(mesh,start,160.f),to=scape::nav::locate(mesh,finish,160.f);
   spdlog::info("Route rejected: {} triangles, start projected {}, goal projected {}, expanded {}; start {:.1f} {:.1f} {:.1f}, goal {:.1f} {:.1f} {:.1f}",mesh.size(),bool(from),bool(to),route.expanded,start.x,start.y,start.z,finish.x,finish.y,finish.z);
  }
- // Bounded latest accepted/rejected snapshots; slow formatting and disk IO stay off input.
- if(auto directory=SKSE::log::log_directory()){
-  static scape::nav::RouteRecorder recorder;
-  recorder.record(*directory,start,finish,std::move(mesh),route);
- }
+ // Grid clicks and waypoints are logged by the plugin. Old triangle CSV files
+ // are not overwritten or presented as recordings of this grid planner.
  return route;
 }
 }
