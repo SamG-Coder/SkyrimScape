@@ -115,6 +115,13 @@ public:
   if(!to&&goalRadius==0){result.reason="destination-has-no-radius-clear-cell";return result;}
   if(std::abs(start.z-cells[*from].position.z)>32.f||!validate(start,cells[*from].position,nav::Traversal::walk)){result.reason="start-to-grid-blocked";return result;}
   if(goalRadius==0&&(!footprint(finish)||std::abs(finish.z-cells[*to].position.z)>32.f||!validate(cells[*to].position,finish,nav::Traversal::walk))){result.reason="grid-to-destination-blocked";return result;}
+  if(goalRadius==0){
+   bool supported=true;int steps=static_cast<int>(std::ceil((finish-start).length()/12.f));
+   for(int i=0;i<=steps;++i){auto at=start+(finish-start)*(static_cast<float>(i)/(std::max)(1,steps));if(!footprint(at)){supported=false;break;}}
+   if(supported&&validate(start,finish,nav::Traversal::walk)){
+    result.route.points={start,finish};result.route.traversal={nav::Traversal::walk,nav::Traversal::walk};result.reason="direct-walk";return result;
+   }
+  }
   search.emplace();auto& s=*search;s.start=start;s.finish=finish;s.goalRadius=goalRadius;s.from=*from;s.to=to.value_or(cells.size());
   s.cost.assign(cells.size(),std::numeric_limits<float>::infinity());s.parent.assign(cells.size(),cells.size());s.actions.resize(cells.size());
   s.cost[*from]=0;s.queue.push({0,0,*from});

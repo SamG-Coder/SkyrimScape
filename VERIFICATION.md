@@ -63,3 +63,10 @@ Added a bounded pool of 48 floating labels, using nearby actor health deltas and
 ## 0.3.4 shared HUD fonts
 
 User reported missing fonts after combat testing. The 0.3.3 log confirms BLOCK and damage events for both player and enemy, so event generation is functioning. Custom labels requested device Arial/_sans with embedFonts=false. Changed combat labels to $EverywhereMediumFont and the grid legend to $EverywhereFont with embedFonts=true, using Skyrim shared font mappings (also documented in SkyUI build/fontconfig.txt). Removed the unneeded bold style request to avoid requiring a separate glyph face. No font archives or global font configuration replaced. Visual confirmation remains pending.
+
+
+## 0.3.5 click-ray correction and font-independent labels
+
+Clicks 28, 32 and 35 in the 0.3.4 session hit geometry with negative normalZ, then projected 291-399 units downward to road points behind the player. Ground-only continuation now selects an upward-facing hit on the same camera ray. Actor and interaction targets retain normal picking. Downward ground projection is restricted to 64 units. Added a physically checked, radius-supported direct-walk fast path; immediate rejected ground clicks restore the prior walk.
+
+User confirmed mapped font labels still failed. All custom text now uses original 5x7 vector glyphs rendered with the existing working GFx drawing API. Combat geometry is cached per displayed text/color. Native build and all three regression suites pass; live appearance and picking still require user validation.

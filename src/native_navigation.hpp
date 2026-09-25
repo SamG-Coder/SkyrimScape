@@ -82,7 +82,7 @@ inline scape::grid::Result plan(scape::Vec start,scape::Vec finish,bool normaliz
  const std::function<bool(scape::Vec)>& goalVisible={}){
  auto& cache=refreshGrid();auto& mesh=cache.mesh;
  if(normalizeGround){
-  auto floor=scape::nav::surface(mesh,finish);
+  auto floor=scape::nav::surface(mesh,finish,48.f,64.f,40.f);
   if(!floor){spdlog::info("Ground click rejected: no walk surface within horizontal projection tolerance at {:.1f} {:.1f} {:.1f}",finish.x,finish.y,finish.z);return {};}
   if((floor->point-finish).length()>40.f)spdlog::info("Ground click projected onto surface: height {:.1f} -> {:.1f}",finish.z,floor->point.z);
   finish=floor->point;

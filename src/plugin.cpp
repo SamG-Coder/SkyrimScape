@@ -68,7 +68,7 @@ void cancel(RE::PlayerControls* c){
  state.traversal.clear();state.activeTraversal=(std::numeric_limits<std::size_t>::max)();
 }
 struct Hit{bool valid{};scape::Vec position;RE::TESObjectREFR* reference{};float normalZ{};};
-Hit cast(RE::NiPoint3 start,RE::NiPoint3 end,bool logIgnored=false){
+Hit cast(RE::NiPoint3 start,RE::NiPoint3 end,bool logIgnored=false,bool groundOnly=false){
  auto p=RE::PlayerCharacter::GetSingleton();auto cell=p?p->GetParentCell():nullptr;auto world=cell?cell->GetbhkWorld():nullptr;
  if(!world)return {};
  RE::bhkPickData pick{};const float scale=RE::bhkWorld::GetWorldScale();
@@ -83,15 +83,16 @@ Hit cast(RE::NiPoint3 start,RE::NiPoint3 end,bool logIgnored=false){
   return ref&&(ref==p||(ref->GetBaseObject()&&ref->GetBaseObject()->GetFormID()==0x0002F245));
  };
  auto firstRef=RE::TESHavokUtilities::FindCollidableRef(*pick.rayOutput.rootCollidable);
- if(ignored(firstRef)){
+ if(ignored(firstRef)||groundOnly){
   RE::hkpAllRayHitCollector collector;RE::bhkPickData all{};all.rayInput=pick.rayInput;all.allRayHitCollector=&collector;world->PickObject(all);
   const RE::hkpWorldRayCastOutput* nearest=nullptr;
   for(const auto& hit:collector.hits){
    if(!hit.HasHit()||!hit.rootCollidable)continue;
    if(ignored(RE::TESHavokUtilities::FindCollidableRef(*hit.rootCollidable)))continue;
+   if(groundOnly){alignas(16) float n[4];_mm_store_ps(n,hit.normal.quad);if(n[2]<.55f)continue;}
    if(!nearest||hit.hitFraction<nearest->hitFraction)nearest=&hit;
   }
-  if(logIgnored)spdlog::info("PICK skipped invisible camera/self reference {:08X}; remaining hit={}",firstRef->GetFormID(),nearest!=nullptr);
+  if(logIgnored)spdlog::info("PICK filtered reference {:08X}; groundOnly={} remaining hit={}",firstRef?firstRef->GetFormID():0,groundOnly,nearest!=nullptr);
   if(!nearest)return {};pick.rayOutput=*nearest;
  }
  alignas(16) float normal[4];_mm_store_ps(normal,pick.rayOutput.normal.quad);
@@ -176,6 +177,19 @@ void click(){
  auto hit=cast(start,start+direction*12000.f,true);auto p=RE::PlayerCharacter::GetSingleton();
  spdlog::info("CLICK {} ray valid={} ref={:08X} collision {:.2f} {:.2f} {:.2f} normalZ={:.3f}",sequence,hit.valid,hit.reference?hit.reference->GetFormID():0,hit.position.x,hit.position.y,hit.position.z,hit.normalZ);
  if(!hit.valid||hit.reference==p){rejectedClick();return;}
+ // Back-facing/vertical geometry is not a walking destination. Follow the same
+ // screen ray to an upward-facing surface instead of dropping its XYZ to ground.
+ bool actionHit=hit.reference&&hit.reference->As<RE::Actor>();
+ if(hit.reference&&hit.reference->GetBaseObject()){
+  auto base=hit.reference->GetBaseObject();auto type=base->GetFormType();
+  actionHit=actionHit||base->IsInventoryObject()||type==RE::FormType::Door||type==RE::FormType::Container||type==RE::FormType::Activator||type==RE::FormType::Furniture;
+ }
+ if(!actionHit&&hit.normalZ<.55f){
+  hit=cast(start,start+direction*12000.f,true,true);
+  if(!hit.valid){rejectedClick();return;}
+  spdlog::info("PICK ground ray continued to {:.2f} {:.2f} {:.2f} normalZ={:.3f}",hit.position.x,hit.position.y,hit.position.z,hit.normalZ);
+ }
+ const auto previous=state;
  cancel(RE::PlayerControls::GetSingleton());state.destination=hit.position;state.order=Order::walk;
  if(hit.reference&&hit.reference->GetBaseObject()){
   auto actor=hit.reference->As<RE::Actor>();auto type=hit.reference->GetBaseObject()->GetFormType();
@@ -185,7 +199,7 @@ void click(){
  }
  state.lastPosition=vec(p->GetPosition());state.lastProgress=Clock::now();state.nextAttack={};
  if(state.order==Order::walk||!actionInReach(p,hit.reference)){
-  if(!planRoute(state.lastPosition)&&!state.planning&&state.order==Order::walk){rejectedClick();cancel(RE::PlayerControls::GetSingleton());return;}
+  if(!planRoute(state.lastPosition)&&!state.planning&&state.order==Order::walk){rejectedClick();cancel(RE::PlayerControls::GetSingleton());if(previous.order==Order::walk){state=previous;state.planning=false;}return;}
  }else{state.plannedTarget=state.destination;state.nextPlan={};}
  if(state.order==Order::walk&&!state.route.empty())state.destination=state.route.back();
  spdlog::info("Click screen {:.3f} {:.3f}, collision {:.1f} {:.1f} {:.1f}, selected {:.1f} {:.1f} {:.1f}",state.cursorX,state.cursorY,hit.position.x,hit.position.y,hit.position.z,state.destination.x,state.destination.y,state.destination.z);
@@ -402,11 +416,9 @@ void drawTerrain(RE::GFxValue& root,bool visible,const std::shared_ptr<const Ter
  RE::GFxValue layer,label;
  if(!root.GetMember("SkyrimScapeTerrain",&layer)||!layer.IsDisplayObject())root.CreateEmptyMovieClip(&layer,"SkyrimScapeTerrain",15997);
  if(!root.GetMember("SkyrimScapeTerrainLegend",&label)){
-  const std::array<RE::GFxValue,6> args{RE::GFxValue("SkyrimScapeTerrainLegend"),RE::GFxValue(15998.),RE::GFxValue(14.),RE::GFxValue(45.),RE::GFxValue(760.),RE::GFxValue(64.)};
-  root.Invoke("createTextField",args);root.GetMember("SkyrimScapeTerrainLegend",&label);
-  label.SetMember("embedFonts",RE::GFxValue(true));
-  label.SetMember("htmlText",RE::GFxValue("<font face='$EverywhereFont' size='16' color='#FFFFFF'>F7: GRID | 32-unit cells | 20-unit circular clearance<br/><font color='#52ED88'>GREEN: supported cells, not guaranteed routes</font> | WHITE: selected route | X-ray view</font>"));
-  label.SetMember("selectable",RE::GFxValue(false));
+  root.CreateEmptyMovieClip(&label,"SkyrimScapeTerrainLegend",15998);
+  vector_text::draw(label,"F7: GRID | GREEN: SUPPORTED CELLS\nWHITE: ROUTE | X-RAY VIEW",1.5,0xFFFFFF);
+  RE::GFxValue::DisplayInfo placement;placement.SetPosition(14,45);label.SetDisplayInfo(placement);
  }
  RE::GFxValue::DisplayInfo info;info.SetVisible(visible);
  if(label.IsDisplayObject())label.SetDisplayInfo(info);
@@ -496,6 +508,6 @@ SKSEPluginLoad(const SKSE::LoadInterface* skse){
  SKSE::Init(skse);auto directory=SKSE::log::log_directory();if(!directory)return false;
  auto log=spdlog::basic_logger_mt("SkyrimScape",(*directory/"SkyrimScape.log").string(),true);
  spdlog::set_default_logger(log);spdlog::flush_on(spdlog::level::info);
- spdlog::info("SkyrimScape experimental 0.3.4 loaded on {}",skse->RuntimeVersion().string());
+ spdlog::info("SkyrimScape experimental 0.3.5 loaded on {}",skse->RuntimeVersion().string());
  return SKSE::GetMessagingInterface()->RegisterListener(message);
 }

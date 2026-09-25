@@ -21,15 +21,16 @@ int main(){
  require(planarDistance(approach.route.points.back(),{400,240,0})<=80&&planarDistance(approach.route.points.back(),{400,240,0})>30,"Approach must stop within reach outside actor collider");
  auto visibleApproach=world.plan({64,240,0},{400,240,0},actorBlocks,180,80,24000,(std::chrono::milliseconds::max)(),[](Vec p){return p.y>280;});
  require(!visibleApproach.route.points.empty()&&visibleApproach.route.points.back().y>280,"Approach must search past cells without target visibility");
- auto sliced=world.plan({64,64,0},{448,448,0},clear,180,0,1);
+ auto shortEdges=[](Vec a,Vec b,nav::Traversal){return (b-a).length()<60.f;};
+ auto sliced=world.plan({64,64,0},{448,448,0},shortEdges,180,0,1);
  require(sliced.pending&&sliced.stats.expanded==1,"Search must yield at the per-frame expansion budget");
  std::size_t frames=1,expanded=sliced.stats.expanded;
  while(sliced.pending&&frames<1000){
-  sliced=world.plan({64,64,0},{448,448,0},clear,180,0,1);++frames;
+  sliced=world.plan({64,64,0},{448,448,0},shortEdges,180,0,1);++frames;
   require(sliced.stats.expanded>=expanded,"Continuation must preserve search progress");expanded=sliced.stats.expanded;
  }
  require(!sliced.pending&&!sliced.route.points.empty()&&frames>1,"Sliced search must eventually return a complete route");
- world.plan({64,64,0},{448,448,0},clear,180,0,1);
+ world.plan({64,64,0},{448,448,0},shortEdges,180,0,1);
  auto retarget=world.plan({64,64,0},{96,64,0},clear,180);
  require(!retarget.route.points.empty()&&planarDistance(retarget.route.points.back(),{96,64,0})<1,"New destination must replace pending search");
  auto blockedNow=world.plan({64,64,0},{448,448,0},[](Vec a,Vec b,nav::Traversal){return a.x<100&&b.x<100;},180);

@@ -2,7 +2,7 @@
 
 An experimental SKSE plugin that turns Skyrim Special Edition into a RuneScape-style click adventure, with an elevated orbit camera, click-to-walk, interactions and hostile-target melee orders.
 
-**Version 0.3.4. Windows x64 Skyrim runtime 1.7.104.0 only.** The plugin refuses other runtimes. This is a source repository, not a complete mod-manager-ready release.
+**Version 0.3.5. Windows x64 Skyrim runtime 1.7.104.0 only.** The plugin refuses other runtimes. This is a source repository, not a complete mod-manager-ready release.
 
 ## Features
 
@@ -108,3 +108,5 @@ Original SkyrimScape code is **GPL-3.0-or-later**; see [LICENSE](LICENSE). [Comm
 SkyrimScape is an independent experimental project, not affiliated with Bethesda or Jagex.
 
 Combat numbers use observed health loss, including mitigation and other health-draining effects. Multiple hits between updates are combined; they are not attributed to a particular attacker. Healing does not produce damage numbers. Actors are sampled within 3000 units; newly observed actors establish a baseline first. BLOCK indicates a blocked hit, not a fabricated prevented-damage amount. Text rendering and event timing still require a live playtest.
+
+Version 0.3.5 draws combat numbers, BLOCK and the grid legend with original vector glyphs, removing the external/shared-font dependency. Ground clicks on steep or downward-facing geometry continue along the screen ray to an upward-facing surface. Ground projection is limited to 64 units downward, preventing distant overhead collisions from projecting onto the road behind the player. Rejected immediate walk requests preserve the previous walk; clear supported straight routes bypass A-star. Obstructed routes may still pause while planning.
