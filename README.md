@@ -2,16 +2,16 @@
 
 An experimental SKSE plugin that turns Skyrim Special Edition into a RuneScape-style click adventure, with an elevated orbit camera, click-to-walk, interactions and hostile-target melee orders.
 
-**Version 0.3.1. Windows x64 Skyrim runtime 1.7.104.0 only.** The plugin refuses other runtimes. This is a source repository, not a complete mod-manager-ready release.
+**Version 0.3.2. Windows x64 Skyrim runtime 1.7.104.0 only.** The plugin refuses other runtimes. This is a source repository, not a complete mod-manager-ready release.
 
 ## Features
 
 - A-star routing on a 32-unit terrain grid, any-angle smoothing, running and character facing toward travel. Native navmesh provides surface heights; its triangle adjacency is no longer used for route search.
 - Independent elevated camera with middle-button orbit and mouse-wheel zoom.
 - Ground-click projection that preserves slopes and separate floor heights.
-- Experimental jump/drop links and calculated one-way walk-off connections. Boundaries are sampled every 48 game units near the player, with landing and clearance checks.
+- Experimental jump/drop transitions between grid cells, with landing and clearance checks.
 - Click-to-approach interactions and hostile-target melee input, with line-of-sight checks.
-- Terrain overlay, directed drop arrows, diagnostic snapshots and offline route replay.
+- Terrain grid overlay, route drawing, click diagnostics and offline route replay.
 
 Completed walks, corrected facing, the camera and the terrain overlay have been observed in live playtests. **Combat, calculated drops, jump execution and all interaction cases remain unverified end to end.** See [VERIFICATION.md](VERIFICATION.md) for detailed evidence and remaining checks.
 
@@ -37,9 +37,11 @@ The grid caches 16x16-cell groups and rebuilds groups when their surface geometr
 
 Every click is logged before planning, including rejected clicks: sequence number, screen coordinates, collision hit/reference and normal, GRID acceptance/rejection reason, cache statistics, collision-check count, and the selected route points. The existing triangle CSV replay remains a tool for older recordings; new grid routes are recorded in the live text log.
 
-Live 0.3.0 tracing identified the invisible FXcameraAttachEffectsACT volume intercepting terrain clicks and producing orders toward its unrelated object origin. Version 0.3.1 filters this confirmed effects form and the player out of ray results, selecting the nearest remaining hit. Other activators remain pickable. The native multi-hit filtering change still needs playtest confirmation.
+Live 0.3.0 tracing identified the invisible FXcameraAttachEffectsACT volume intercepting terrain clicks and producing orders toward its unrelated object origin. Version 0.3.1 filters this confirmed effects form and the player out of ray results, selecting the nearest remaining hit. Other activators remain pickable. Later logs confirm that camera/self hits are skipped.
 
-The active route is drawn in white, with a diamond at the selected destination. Version 0.2.7 routes through shared-edge crossing points instead of triangle centers, scores travel from the entry point, and gives traversal actions an additional cost. Ground clicks without a valid vertical surface projection are rejected rather than falling back to a different nearby endpoint. These changes need continued live testing.
+Version 0.3.2 smooths from the actual player position so the nearest grid anchor does not force an initial backward step. Actor/object routes search for a visible approach cell within 80 units rather than walking into the target collider. Failed chase plans retain the order and retry; clicking another target replaces the previous search.
+
+Native A-star searches resume across input updates, with a soft 4 ms / 128-expansion budget per call. Grid refresh is deferred during a pending search. Initialization, an individual expansion and final smoothing can exceed the soft budget; slow slices are logged. Completed-plan logs include slice count and maximum slice time. The F7 renderer separates outlines into 256-cell Flash shapes and logs snapshot/draw timings and visible cell counts. These 0.3.2 changes pass portable regression tests and still need a live gameplay check.
 
 ## Build on Windows
 
@@ -81,7 +83,7 @@ Install SkyrimScape.cmd uses the default path above. The advanced scripts/prepar
 - Calculated drops are local to the player and require existing landing mesh. Their height bound uses a margin below the game's fall-damage setting, capped at 512 units. Actual fall behavior remains experimental.
 - Attack orders submit right-hand melee input. Ranged aiming, spell charging and complete combat timing are unfinished.
 - Camera obstruction handling, persistent world destination markers, target labels and a right-click action menu are unfinished.
-- Overlay shading indicates graph connectivity, not guaranteed click visibility through foreground objects.
+- Green overlay cells indicate terrain support, not verified connectivity or click visibility through foreground objects.
 
 ## Diagnostics
 

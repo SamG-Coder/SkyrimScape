@@ -44,3 +44,12 @@ The user confirmed travel direction was fine, but reported broken pathfinding, s
 5. Verify native melee attacks actually hit, target chasing, interaction, menus and save/load handoff.
 
 The assistant may launch Skyrim when requested but must not operate the user's mouse or keyboard. Never replace the installed DLL during a running Skyrim process.
+
+
+## 0.3.2 click, combat and spike investigation
+
+The 0.3.1 playtest log at 12:35 contains repeated `grid-to-destination-blocked` rejections for moving actors, followed by cancellation of their orders. At 12:35:18.253 click 68 starts a search that finishes at 12:35:19.942 with 14,708 expansions and 113,491 collision checks (about 1.69 seconds). Accepted ground routes also contain a first grid anchor behind the actual starting position.
+
+Changes: smooth with the actual start included; search for an 80-unit target approach region with visibility checks; retain action orders through failed/pending chase plans; resume A-star state across input updates with a soft 4 ms / 128-expansion slice; invalidate dynamic edge results for each new search; split F7 outlines into 256-cell shapes and add drawing/snapshot diagnostics. The old log does not establish the exact cause of intermittent F7 disappearance, so the rendering change remains a candidate fix pending user playtest.
+
+Regression coverage adds backward-anchor avoidance, occupied-target approach, target visibility, incremental search completion, pending-search replacement and dynamic collision invalidation. Native gameplay and overlay behavior for this build remain unverified until the user plays it.

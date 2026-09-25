@@ -30,12 +30,14 @@ struct State{
  std::size_t waypoint{};
  scape::Vec plannedTarget{};
  Clock::time_point nextPlan{};
+ bool planning{};
+ Clock::time_point planStarted{};std::size_t planSlices{};double maxPlanSliceMs{};
  Clock::time_point nextMovementLog{};
  bool savedRunning{},runningOwned{};
  Clock::time_point nextTerrainCheck{},nextJump{};
 }state;
 struct Display{bool enabled{};float x{.5f},y{.5f};bool overlay{};}display;
-struct TerrainDisplay{std::vector<scape::nav::Triangle> mesh;std::vector<unsigned char> reachable;std::vector<scape::grid::Cell> cells;};
+struct TerrainDisplay{std::vector<scape::grid::Cell> cells;};
 std::shared_ptr<const TerrainDisplay> terrainDisplay;
 std::vector<scape::Vec> displayedRoute;
 struct ClickFeedback{float x{},y{};bool action{};Clock::time_point when{};}clickFeedback;
@@ -56,6 +58,7 @@ void attackButton(RE::PlayerControls* controls,bool down){
  state.attackHeld=down;
 }
 void cancel(RE::PlayerControls* c){
+ native_navigation::gridCache().grid.abandon();state.planning=false;
  if(state.attackHeld)attackButton(c,false);
  if(c&&state.ownsMovement){c->data.moveInputVec={0,0};c->data.prevMoveVec={0,0};state.ownsMovement=false;}
  if(c&&state.runningOwned){c->data.running=state.savedRunning;state.runningOwned=false;}
@@ -138,12 +141,23 @@ RE::NiCamera* findCamera(RE::NiAVObject* o){
 }
 bool planRoute(scape::Vec position){
  auto started=Clock::now();
- auto route=native_navigation::plan(position,state.destination,state.order==Order::walk,clearTraversal);
- if(route.points.empty()){spdlog::info("No usable grid route to destination; see preceding GRID reason");return false;}
+ if(!state.planning){state.planStarted=started;state.planSlices=0;state.maxPlanSliceMs=0;}
+ auto goalVisible=[](scape::Vec approach){
+  auto target=state.target.get();if(!target)return false;
+  auto hit=cast(point(approach+scape::Vec{0,0,60}),point(state.destination+scape::Vec{0,0,60}));
+  return !hit.valid||hit.reference==target.get();
+ };
+ auto result=native_navigation::plan(position,state.destination,state.order==Order::walk,clearTraversal,goalVisible);
+ ++state.planSlices;auto elapsed=std::chrono::duration<double,std::milli>(Clock::now()-started).count();state.maxPlanSliceMs=(std::max)(state.maxPlanSliceMs,elapsed);
+ if(elapsed>12)spdlog::info("PLAN slow slice {:.2f} ms expanded={} pending={}",elapsed,result.stats.expanded,result.pending);
+ state.planning=result.pending;state.nextPlan=Clock::now()+std::chrono::milliseconds(result.pending?0:750);
+ if(result.pending)return false;
+ auto& route=result.route;
+ if(route.points.empty()){spdlog::info("No usable grid route: slices={} maxSliceMs={:.2f}; see preceding GRID reason",state.planSlices,state.maxPlanSliceMs);return false;}
  state.route=std::move(route.points);state.waypoint=0;state.plannedTarget=state.destination;
  state.traversal=std::move(route.traversal);state.activeTraversal=(std::numeric_limits<std::size_t>::max)();
  state.nextPlan=Clock::now()+std::chrono::milliseconds(750);
- spdlog::info("Planned {} waypoints, expanded {} grid cells in {:.2f} ms",state.route.size(),route.expanded,std::chrono::duration<double,std::milli>(Clock::now()-started).count());
+ spdlog::info("Planned {} waypoints, expanded {} grid cells; slices={} maxSliceMs={:.2f} elapsedMs={:.2f}",state.route.size(),route.expanded,state.planSlices,state.maxPlanSliceMs,std::chrono::duration<double,std::milli>(Clock::now()-state.planStarted).count());
  for(std::size_t i=0;i<state.route.size();++i){auto p=state.route[i];spdlog::info("ROUTE point {} type={} position {:.2f} {:.2f} {:.2f}",i,static_cast<int>(state.traversal[i]),p.x,p.y,p.z);}
  return true;
 }
@@ -170,9 +184,9 @@ void click(){
  }
  state.lastPosition=vec(p->GetPosition());state.lastProgress=Clock::now();state.nextAttack={};
  if(state.order==Order::walk||!actionInReach(p,hit.reference)){
-  if(!planRoute(state.lastPosition)){rejectedClick();cancel(RE::PlayerControls::GetSingleton());return;}
+  if(!planRoute(state.lastPosition)&&!state.planning&&state.order==Order::walk){rejectedClick();cancel(RE::PlayerControls::GetSingleton());return;}
  }else{state.plannedTarget=state.destination;state.nextPlan={};}
- if(state.order==Order::walk)state.destination=state.route.back();
+ if(state.order==Order::walk&&!state.route.empty())state.destination=state.route.back();
  spdlog::info("Click screen {:.3f} {:.3f}, collision {:.1f} {:.1f} {:.1f}, selected {:.1f} {:.1f} {:.1f}",state.cursorX,state.cursorY,hit.position.x,hit.position.y,hit.position.z,state.destination.x,state.destination.y,state.destination.z);
  {std::lock_guard lock(displayMutex);clickFeedback={state.cursorX,state.cursorY,state.order!=Order::walk,Clock::now()};}
  spdlog::info("Order {} target {:08X} destination {:.1f} {:.1f} {:.1f}",static_cast<int>(state.order),hit.reference?hit.reference->GetFormID():0,state.destination.x,state.destination.y,state.destination.z);
@@ -222,9 +236,14 @@ void tick(RE::PlayerControls* c){
  const bool arrived=!pendingTraversal&&state.activeTraversal==(std::numeric_limits<std::size_t>::max)()&&
   (state.order==Order::walk?(scape::reached(position,state.destination,orderRange())&&std::abs(position.z-state.destination.z)<=35.f):actionInReach(p,target.get()));
  if(!arrived){
-  if(state.order!=Order::walk&&state.activeTraversal==(std::numeric_limits<std::size_t>::max)()&&now>=state.nextPlan&&
+  if((state.planning||state.order!=Order::walk)&&state.activeTraversal==(std::numeric_limits<std::size_t>::max)()&&now>=state.nextPlan&&
      (state.route.empty()||state.waypoint>=state.route.size()||(state.destination-state.plannedTarget).length()>80.f)){
-   if(!planRoute(position)){cancel(c);return;}
+   if(!planRoute(position)){
+    c->data.moveInputVec={0,0};c->data.prevMoveVec={0,0};
+    state.route.clear();state.traversal.clear();state.waypoint=0;state.lastProgress=now;
+    if(!state.planning&&state.order==Order::walk){rejectedClick();cancel(c);}return;
+   }
+   if(state.order==Order::walk)state.destination=state.route.back();
   }
   while(state.waypoint<state.route.size()&&state.traversal[state.waypoint]==scape::nav::Traversal::walk){
    bool takeoff=state.waypoint+1<state.route.size()&&state.traversal[state.waypoint+1]!=scape::nav::Traversal::walk;
@@ -235,7 +254,9 @@ void tick(RE::PlayerControls* c){
   if(state.waypoint<state.route.size()&&state.traversal[state.waypoint]!=scape::nav::Traversal::walk&&!followTraversal(c,position))return;
   if(state.waypoint>=state.route.size()){
    // Reaching a projected approach point is not proof that a distant object is in activation range.
-   spdlog::info("Stopped at route end outside action range");cancel(c);return;
+   c->data.moveInputVec={0,0};c->data.prevMoveVec={0,0};
+   if(state.order==Order::walk)cancel(c);
+   return;
   }
   // Face the route and run forward, as requested. Keep the native movement
   // heading in sync this tick; the visible RuneScape orbit stays independent.
@@ -265,7 +286,7 @@ void tick(RE::PlayerControls* c){
  }
  c->data.moveInputVec={0,0};c->data.prevMoveVec={0,0};state.ownsMovement=false;
  state.lastPosition=position;state.lastProgress=now;
- if(state.order==Order::attack){state.route.clear();state.traversal.clear();state.waypoint=0;state.nextPlan={};}
+ if(state.order==Order::attack){native_navigation::gridCache().grid.abandon();state.planning=false;state.route.clear();state.traversal.clear();state.waypoint=0;state.nextPlan={};}
  if(state.runningOwned){c->data.running=state.savedRunning;state.runningOwned=false;}
  if(state.order!=Order::walk)p->SetHeading(scape::heading(position,state.destination));
  if(state.order==Order::walk){spdlog::info("Walk destination reached");cancel(c);return;}
@@ -327,7 +348,9 @@ RE::BSEventNotifyControl input(RE::PlayerControls* c,RE::InputEvent* const* even
  if(active){
   c->data.lookInputVec={0,0};tick(c);
   if(state.overlay&&Clock::now()>=state.nextOverlay){
+   auto started=Clock::now();
    auto terrain=std::make_shared<TerrainDisplay>();terrain->cells=native_navigation::refreshGrid().grid.supportedCells();
+   spdlog::info("OVERLAY snapshot cells={} elapsedMs={:.2f}",terrain->cells.size(),std::chrono::duration<double,std::milli>(Clock::now()-started).count());
    {std::lock_guard lock(displayMutex);terrainDisplay=std::move(terrain);}
    state.nextOverlay=Clock::now()+std::chrono::seconds(2);
   }
@@ -386,47 +409,31 @@ void drawTerrain(RE::GFxValue& root,bool visible,const std::shared_ptr<const Ter
  RE::GFxValue::DisplayInfo info;info.SetVisible(visible);
  if(label.IsDisplayObject())label.SetDisplayInfo(info);
  if(!layer.IsDisplayObject())return;layer.SetDisplayInfo(info);if(!visible||!terrain)return;
- static Clock::time_point nextDraw{};if(Clock::now()<nextDraw)return;nextDraw=Clock::now()+std::chrono::milliseconds(66);
- layer.Invoke("clear");auto pc=RE::PlayerCamera::GetSingleton();auto camera=pc?findCamera(pc->cameraRoot.get()):nullptr;if(!camera)return;
+ static Clock::time_point nextDraw{},nextDiagnostic{};if(Clock::now()<nextDraw)return;nextDraw=Clock::now()+std::chrono::milliseconds(100);
+ auto pc=RE::PlayerCamera::GetSingleton();auto camera=pc?findCamera(pc->cameraRoot.get()):nullptr;if(!camera)return;
+ auto drawStarted=Clock::now();layer.Invoke("clear");
+ // Separate shapes keep each Flash mesh small. Clear previous chunks even when
+ // the next view contains fewer cells; the parent controls F7 visibility.
+ static std::size_t previousChunks=0;RE::GFxValue gridLayer;
+ for(std::size_t i=0;i<previousChunks;++i){RE::GFxValue old;auto name="grid"+std::to_string(i);if(layer.GetMember(name.c_str(),&old))old.Invoke("clear");}
+ std::size_t drawn=0,chunks=0;
+ const std::array<RE::GFxValue,3> gridStroke{RE::GFxValue(.65),RE::GFxValue(5434760.),RE::GFxValue(50.)};
  for(const auto& cell:terrain->cells){
   std::vector<scape::nav::ScreenPoint> polygon;bool valid=true;
   for(auto offset:{scape::Vec{-14,-14,2},scape::Vec{14,-14,2},scape::Vec{14,14,2},scape::Vec{-14,14,2}}){
-   float x{},y{},z{};if(!camera->WorldPtToScreenPt3(point(cell.position+offset),x,y,z,1e-5f)){valid=false;break;}polygon.push_back({x,1-y});
+   float x{},y{},z{};if(!camera->WorldPtToScreenPt3(point(cell.position+offset),x,y,z,1e-5f)||!std::isfinite(x)||!std::isfinite(y)){valid=false;break;}polygon.push_back({x,1-y});
   }
   if(!valid)continue;polygon=scape::nav::clipScreen(std::move(polygon));if(polygon.size()<3)continue;
-  const std::array<RE::GFxValue,3> stroke{RE::GFxValue(.65),RE::GFxValue(5434760.),RE::GFxValue(50.)};layer.Invoke("lineStyle",stroke);
-  for(std::size_t i=0;i<=polygon.size();++i){auto p=polygon[i%polygon.size()];const std::array<RE::GFxValue,2> xy{RE::GFxValue(rect.left+p.x*(rect.right-rect.left)),RE::GFxValue(rect.top+p.y*(rect.bottom-rect.top))};layer.Invoke(i?"lineTo":"moveTo",xy);}
- }
- for(std::size_t i=0;i<terrain->mesh.size();++i){
-  std::vector<scape::nav::ScreenPoint> polygon;bool valid=true;
-  for(auto vertex:terrain->mesh[i].vertices){
-   float x{},y{},z{};
-   if(!camera->WorldPtToScreenPt3(point(vertex),x,y,z,1e-5f)||!std::isfinite(x)||!std::isfinite(y)){valid=false;break;}
-   polygon.push_back({x,1.f-y});
+  if(drawn%256==0){
+   auto name="grid"+std::to_string(chunks);if(!layer.GetMember(name.c_str(),&gridLayer)||!gridLayer.IsDisplayObject())layer.CreateEmptyMovieClip(&gridLayer,name.c_str(),static_cast<std::int32_t>(chunks+1));
+   if(!gridLayer.IsDisplayObject())break;
+   gridLayer.Invoke("lineStyle",gridStroke);++chunks;
   }
-  if(!valid)continue;polygon=scape::nav::clipScreen(std::move(polygon));if(polygon.size()<3)continue;
-  double color=terrain->reachable[i]==1?0x52ED88:terrain->reachable[i]==2?0x53DFFF:0xFF765E;
-  const std::array<RE::GFxValue,3> stroke{RE::GFxValue(.6),RE::GFxValue(color),RE::GFxValue(45.)};layer.Invoke("lineStyle",stroke);
-  const std::array<RE::GFxValue,2> fill{RE::GFxValue(color),RE::GFxValue(12.)};layer.Invoke("beginFill",fill);
-  for(std::size_t p=0;p<=polygon.size();++p){
-   auto v=polygon[p%polygon.size()];const std::array<RE::GFxValue,2> xy{RE::GFxValue(rect.left+v.x*(rect.right-rect.left)),RE::GFxValue(rect.top+v.y*(rect.bottom-rect.top))};
-   layer.Invoke(p==0?"moveTo":"lineTo",xy);
-  }
-  layer.Invoke("endFill");
+  ++drawn;
+  for(std::size_t i=0;i<=polygon.size();++i){auto p=polygon[i%polygon.size()];const std::array<RE::GFxValue,2> xy{RE::GFxValue(rect.left+p.x*(rect.right-rect.left)),RE::GFxValue(rect.top+p.y*(rect.bottom-rect.top))};gridLayer.Invoke(i?"lineTo":"moveTo",xy);}
  }
- // Draw actual directed connections, not just polygon borders.
- for(const auto& triangle:terrain->mesh)for(const auto& link:triangle.links){
-  float ax{},ay{},az{},bx{},by{},bz{};
-  if(!camera->WorldPtToScreenPt3(point(link.takeoff),ax,ay,az,1e-5f)||!camera->WorldPtToScreenPt3(point(link.landing),bx,by,bz,1e-5f))continue;
-  if(ax<0||ax>1||ay<0||ay>1||bx<0||bx>1||by<0||by>1)continue;
-  ax=rect.left+ax*(rect.right-rect.left);bx=rect.left+bx*(rect.right-rect.left);
-  ay=rect.top+(1-ay)*(rect.bottom-rect.top);by=rect.top+(1-by)*(rect.bottom-rect.top);
-  float dx=bx-ax,dy=by-ay,length=std::hypot(dx,dy);if(length<2)continue;dx/=length;dy/=length;
-  const std::array<RE::GFxValue,3> stroke{RE::GFxValue(1.8),RE::GFxValue(16765286.),RE::GFxValue(95.)};layer.Invoke("lineStyle",stroke);
-  auto vertex=[&](const char* method,float x,float y){const std::array<RE::GFxValue,2> xy{RE::GFxValue(x),RE::GFxValue(y)};layer.Invoke(method,xy);};
-  vertex("moveTo",ax,ay);vertex("lineTo",bx,by);
-  vertex("moveTo",bx-dx*7+dy*4,by-dy*7-dx*4);vertex("lineTo",bx,by);vertex("lineTo",bx-dx*7-dy*4,by-dy*7+dx*4);
- }
+ previousChunks=chunks;
+ if(Clock::now()>=nextDiagnostic){spdlog::info("OVERLAY supported={} drawn={} chunks={} drawMs={:.2f}",terrain->cells.size(),drawn,chunks,std::chrono::duration<double,std::milli>(Clock::now()-drawStarted).count());nextDiagnostic=Clock::now()+std::chrono::seconds(5);}
  const std::array<RE::GFxValue,3> routeStroke{RE::GFxValue(2.5),RE::GFxValue(16777215.),RE::GFxValue(100.)};layer.Invoke("lineStyle",routeStroke);
  bool previous=false;
  for(std::size_t i=0;i<route.size();++i){
@@ -484,6 +491,6 @@ SKSEPluginLoad(const SKSE::LoadInterface* skse){
  SKSE::Init(skse);auto directory=SKSE::log::log_directory();if(!directory)return false;
  auto log=spdlog::basic_logger_mt("SkyrimScape",(*directory/"SkyrimScape.log").string(),true);
  spdlog::set_default_logger(log);spdlog::flush_on(spdlog::level::info);
- spdlog::info("SkyrimScape experimental 0.3.1 loaded on {}",skse->RuntimeVersion().string());
+ spdlog::info("SkyrimScape experimental 0.3.2 loaded on {}",skse->RuntimeVersion().string());
  return SKSE::GetMessagingInterface()->RegisterListener(message);
 }

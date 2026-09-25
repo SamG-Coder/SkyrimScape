@@ -72,13 +72,14 @@ inline GridCache& refreshGrid(){
  auto now=std::chrono::steady_clock::now();
  bool changed=wid!=cache.world||(!wid&&cid!=cache.cell);
  if(changed){cache.grid.clear();cache.mesh.clear();}
- if(changed||cache.mesh.empty()||now-cache.refreshed>std::chrono::seconds(2)||scape::planarDistance(position,cache.focus)>256.f){
+ if(changed||cache.mesh.empty()||(!cache.grid.pending()&&(now-cache.refreshed>std::chrono::seconds(2)||scape::planarDistance(position,cache.focus)>256.f))){
   cache.mesh=snapshot();cache.grid.update(cache.mesh,position);cache.focus=position;cache.refreshed=now;cache.world=wid;cache.cell=cid;
  }
  return cache;
 }
-inline scape::nav::Route plan(scape::Vec start,scape::Vec finish,bool normalizeGround,
- const std::function<bool(scape::Vec,scape::Vec,scape::nav::Traversal)>& clearTraversal){
+inline scape::grid::Result plan(scape::Vec start,scape::Vec finish,bool normalizeGround,
+ const std::function<bool(scape::Vec,scape::Vec,scape::nav::Traversal)>& clearTraversal,
+ const std::function<bool(scape::Vec)>& goalVisible={}){
  auto& cache=refreshGrid();auto& mesh=cache.mesh;
  if(normalizeGround){
   auto floor=scape::nav::surface(mesh,finish);
@@ -88,7 +89,8 @@ inline scape::nav::Route plan(scape::Vec start,scape::Vec finish,bool normalizeG
  }
  float maxDrop=180.f;
  if(auto settings=RE::GameSettingCollection::GetSingleton())if(auto setting=settings->GetSetting("fJumpFallHeightMin")){float threshold=setting->GetFloat();if(std::isfinite(threshold)&&threshold>=40.f)maxDrop=(std::min)(512.f,threshold*.75f);}
- auto result=cache.grid.plan(start,finish,clearTraversal,maxDrop);auto route=std::move(result.route);
+ auto result=cache.grid.plan(start,finish,clearTraversal,maxDrop,normalizeGround?0.f:80.f,128,std::chrono::milliseconds(4),goalVisible);auto& route=result.route;
+ if(result.pending)return result;
  spdlog::info("GRID result={} cells={} groups={} reused={} rebuilt={} expanded={} collisionChecks={} waypoints={}",result.reason,result.stats.cells,result.stats.groups,result.stats.reused,result.stats.built,result.stats.expanded,result.stats.clearanceChecks,route.points.size());
  if(route.points.empty()){
   auto from=scape::nav::locate(mesh,start,160.f),to=scape::nav::locate(mesh,finish,160.f);
@@ -96,6 +98,6 @@ inline scape::nav::Route plan(scape::Vec start,scape::Vec finish,bool normalizeG
  }
  // Grid clicks and waypoints are logged by the plugin. Old triangle CSV files
  // are not overwritten or presented as recordings of this grid planner.
- return route;
+ return result;
 }
 }

@@ -3,13 +3,14 @@
 #include <bit>
 #include <functional>
 #include <unordered_set>
+#include <chrono>
 namespace scape::grid {
 constexpr float spacing=32.f,radius=20.f;
 constexpr int groupSize=16;
 struct Cell {int x{},y{};Vec position;};
 struct Group {std::uint64_t signature{};std::vector<Cell> cells;};
 struct Stats {std::size_t groups{},reused{},built{},cells{},expanded{},clearanceChecks{};};
-struct Result {nav::Route route;Stats stats;const char* reason{"no-route"};};
+struct Result {nav::Route route;Stats stats;const char* reason{"no-route"};bool pending{};};
 inline int coordinate(float v){return static_cast<int>(std::floor(v/spacing));}
 inline int groupCoordinate(int v){return static_cast<int>(std::floor(v/static_cast<float>(groupSize)));}
 inline std::uint64_t key(int x,int y){return nav::gridKey(x,y);}
@@ -22,6 +23,13 @@ class World {
  std::vector<signed char> clearance;
  std::unordered_map<std::uint64_t,bool> edges;
  Stats stats;
+ struct Entry {float f,g;std::size_t i;bool operator<(const Entry& b)const{return f>b.f;}};
+ struct Search {
+  Vec start,finish;float goalRadius{};std::size_t from{},to{},expanded{},checks{};
+  std::priority_queue<Entry> queue;std::vector<float> cost;
+  std::vector<std::size_t> parent;std::vector<nav::Traversal> actions;
+ };
+ std::optional<Search> search;
  bool supportAt(float x,float y,float z)const{
   auto found=sources.find(key(groupCoordinate(coordinate(x)),groupCoordinate(coordinate(y))));if(found==sources.end())return false;
   for(auto index:found->second){
@@ -54,9 +62,11 @@ class World {
   return true;
  }
 public:
- void clear(){mesh.clear();sources.clear();groups.clear();cells.clear();columns.clear();clearance.clear();edges.clear();}
+ void abandon(){search.reset();}
+ bool pending()const{return search.has_value();}
+ void clear(){abandon();mesh.clear();sources.clear();groups.clear();cells.clear();columns.clear();clearance.clear();edges.clear();}
  void update(std::vector<nav::Triangle> input,Vec focus,float range=2600.f){
-  mesh=std::move(input);sources.clear();stats={};
+  abandon();mesh=std::move(input);sources.clear();stats={};
   int gx0=groupCoordinate(coordinate(focus.x-range)),gx1=groupCoordinate(coordinate(focus.x+range));
   int gy0=groupCoordinate(coordinate(focus.y-range)),gy1=groupCoordinate(coordinate(focus.y+range));
   for(std::size_t i=0;i<mesh.size();++i){auto& t=mesh[i];if(!nav::walkable(t))continue;
@@ -92,25 +102,40 @@ public:
  const Stats& statistics()const{return stats;}
  std::vector<Cell> supportedCells(){std::vector<Cell> result;for(std::size_t i=0;i<cells.size();++i)if(clearCell(i))result.push_back(cells[i]);return result;}
  using Validator=std::function<bool(Vec,Vec,nav::Traversal)>;
- Result plan(Vec start,Vec finish,const Validator& validate,float maxDrop){
+ Result plan(Vec start,Vec finish,const Validator& validate,float maxDrop,float goalRadius=0,
+             std::size_t sliceExpansions=24000,std::chrono::milliseconds sliceTime=(std::chrono::milliseconds::max)(),
+             const std::function<bool(Vec)>& goalVisible={}){
   Result result;result.stats=stats;
+  auto started=std::chrono::steady_clock::now();
+  if(search&&((search->start-start).length()>8.f||(search->finish-finish).length()>32.f||search->goalRadius!=goalRadius))abandon();
+  if(!search){
+  // Actor/object orders end in an approach region, never inside the target's collider.
   auto from=nearest(start,64.f,80.f),to=nearest(finish,48.f,80.f);
   if(!from){result.reason="start-has-no-radius-clear-cell";return result;}
-  if(!to){result.reason="destination-has-no-radius-clear-cell";return result;}
+  if(!to&&goalRadius==0){result.reason="destination-has-no-radius-clear-cell";return result;}
   if(std::abs(start.z-cells[*from].position.z)>32.f||!validate(start,cells[*from].position,nav::Traversal::walk)){result.reason="start-to-grid-blocked";return result;}
-  if(!footprint(finish)||std::abs(finish.z-cells[*to].position.z)>32.f||!validate(cells[*to].position,finish,nav::Traversal::walk)){result.reason="grid-to-destination-blocked";return result;}
+  if(goalRadius==0&&(!footprint(finish)||std::abs(finish.z-cells[*to].position.z)>32.f||!validate(cells[*to].position,finish,nav::Traversal::walk))){result.reason="grid-to-destination-blocked";return result;}
+  search.emplace();auto& s=*search;s.start=start;s.finish=finish;s.goalRadius=goalRadius;s.from=*from;s.to=to.value_or(cells.size());
+  s.cost.assign(cells.size(),std::numeric_limits<float>::infinity());s.parent.assign(cells.size(),cells.size());s.actions.resize(cells.size());
+  s.cost[*from]=0;s.queue.push({0,0,*from});
+  // Physics results are useful across slices of this search, but must not outlive moving actors.
+  edges.clear();
+  }
+  auto& s=*search;auto& queue=s.queue;auto& cost=s.cost;auto& parent=s.parent;auto& actions=s.actions;
+  auto from=s.from;auto to=s.to;finish=s.finish;start=s.start;std::size_t sliceCount=0;
   auto canEdge=[&](std::size_t a,std::size_t b,nav::Traversal type){
    auto id=(static_cast<std::uint64_t>(a)<<32)|b;auto found=edges.find(id);if(found!=edges.end())return found->second;
-   ++result.stats.clearanceChecks;return edges[id]=validate(cells[a].position,cells[b].position,type);
+   result.stats.clearanceChecks=++s.checks;return edges[id]=validate(cells[a].position,cells[b].position,type);
   };
-  struct Entry {float f,g;std::size_t i;bool operator<(const Entry& b)const{return f>b.f;}};
-  std::priority_queue<Entry> queue;auto absent=cells.size();std::vector<float> cost(absent,std::numeric_limits<float>::infinity());
-  std::vector<std::size_t> parent(absent,absent);std::vector<nav::Traversal> actions(absent);
-  cost[*from]=0;queue.push({0,0,*from});
-  while(!queue.empty()&&result.stats.expanded<24000){
-   auto current=queue.top();queue.pop();if(current.g>cost[current.i])continue;++result.stats.expanded;
-   if(current.i==*to){
-    std::vector<std::size_t> chain;for(auto i=*to;;i=parent[i]){chain.push_back(i);if(i==*from)break;}
+  while(!queue.empty()&&s.expanded<24000){
+   if(sliceCount>=sliceExpansions||(sliceCount>0&&sliceTime!=(std::chrono::milliseconds::max)()&&std::chrono::steady_clock::now()-started>=sliceTime)){
+    result.pending=true;result.reason="search-pending";result.stats.expanded=s.expanded;return result;
+   }
+   auto current=queue.top();queue.pop();if(current.g>cost[current.i])continue;++s.expanded;++sliceCount;result.stats.expanded=s.expanded;
+   auto goal=cells[current.i].position;
+   if(goalRadius>0?(planarDistance(goal,finish)<=goalRadius&&std::abs(goal.z-finish.z)<=64.f&&(!goalVisible||goalVisible(goal))):current.i==to){
+    std::vector<std::size_t> chain;for(auto i=current.i;;i=parent[i]){chain.push_back(i);if(i==from)break;}
+    result.route.points.push_back(start);result.route.traversal.push_back(nav::Traversal::walk);
     for(auto it=chain.rbegin();it!=chain.rend();++it){result.route.points.push_back(cells[*it].position);result.route.traversal.push_back(actions[*it]);}
     // Greedy any-angle simplification uses circular support and physical checks,
     // and never smooths across a jump/drop action.
@@ -125,9 +150,8 @@ public:
      }
      smooth.points.push_back(result.route.points[next]);smooth.traversal.push_back(result.route.traversal[next]);i=next;
     }
-    if(validate(start,smooth.points.front(),nav::Traversal::walk)){smooth.points.insert(smooth.points.begin(),start);smooth.traversal.insert(smooth.traversal.begin(),nav::Traversal::walk);}
-    if(planarDistance(smooth.points.back(),finish)<48.f&&std::abs(smooth.points.back().z-finish.z)<32.f&&validate(smooth.points.back(),finish,nav::Traversal::walk)){smooth.points.push_back(finish);smooth.traversal.push_back(nav::Traversal::walk);}
-    smooth.expanded=result.stats.expanded;result.route=std::move(smooth);result.reason="accepted";return result;
+    if(goalRadius==0&&planarDistance(smooth.points.back(),finish)<48.f&&std::abs(smooth.points.back().z-finish.z)<32.f&&validate(smooth.points.back(),finish,nav::Traversal::walk)){smooth.points.push_back(finish);smooth.traversal.push_back(nav::Traversal::walk);}
+    smooth.expanded=result.stats.expanded;result.route=std::move(smooth);result.reason="accepted";abandon();return result;
    }
    const auto& cell=cells[current.i];
    for(int dx=-1;dx<=1;++dx)for(int dy=-1;dy<=1;++dy){if(!dx&&!dy)continue;
@@ -144,12 +168,12 @@ public:
       if(action==nav::Traversal::walk)adjacentWalk=true;
       float proposed=current.g+(b-a).length()+(action==nav::Traversal::walk?0:250.f+std::abs(dz)*.5f);
       if(proposed>=cost[next])continue;cost[next]=proposed;parent[next]=current.i;actions[next]=action;
-      queue.push({proposed+(b-cells[*to].position).length(),proposed,next});
+      queue.push({proposed+(std::max)(0.f,(b-finish).length()-goalRadius),proposed,next});
      }
     }
    }
   }
-  result.reason=result.stats.expanded>=24000?"search-budget-exhausted":"no-connected-grid-route";return result;
+  result.reason=result.stats.expanded>=24000?"search-budget-exhausted":"no-connected-grid-route";abandon();return result;
  }
 };
 }
