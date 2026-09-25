@@ -21,7 +21,16 @@ public:
   if(auto found=cache.find(c);found!=cache.end())return found->second;
   Glyph g;MAT2 matrix{{0,1},{0,0},{0,0},{0,1}};
   if(dc&&font){auto size=GetGlyphOutlineW(dc,c,GGO_GRAY8_BITMAP,&g.metrics,0,nullptr,&matrix);
-   if(size!=GDI_ERROR){g.pixels.resize(size);g.stride=(g.metrics.gmBlackBoxX+3)&~3u;g.valid=size==0||GetGlyphOutlineW(dc,c,GGO_GRAY8_BITMAP,&g.metrics,size,g.pixels.data(),&matrix)!=GDI_ERROR;}
+   if(size!=GDI_ERROR){
+    g.pixels.resize(size);g.stride=(g.metrics.gmBlackBoxX+3)&~3u;
+    // GDI reports a 1x1 black box for space but returns no bitmap. Preserve
+    // its advance while ensuring consumers never iterate nonexistent pixels.
+    if(size==0){g.metrics.gmBlackBoxX=0;g.metrics.gmBlackBoxY=0;g.stride=0;g.valid=true;}
+    else{
+     g.valid=GetGlyphOutlineW(dc,c,GGO_GRAY8_BITMAP,&g.metrics,size,g.pixels.data(),&matrix)!=GDI_ERROR;
+     if(!g.stride||g.metrics.gmBlackBoxY>g.pixels.size()/g.stride||g.metrics.gmBlackBoxX>g.stride)g.valid=false;
+    }
+   }
   }return cache.emplace(c,std::move(g)).first->second;
  }
 };

@@ -75,3 +75,8 @@ User confirmed mapped font labels still failed. All custom text now uses origina
 ## 0.3.6 Windows font and stamina-aware combat
 
 Added Windows Segoe UI semibold glyph extraction using GDI gray coverage and cached HUD geometry. A native test verifies this machine resolves Segoe UI, provides all required glyphs with nonzero advances, and returns anti-aliased coverage. Added combat policy tests for defense thresholds/hysteresis, no-threat/equipment gating, heavy-attack cadence/cooldown, threat priority and stamina reserve. All five suites pass. Native control integration compiles; no automated gameplay input was used. User validation remains necessary for block/power animation execution, stamina consumption and font appearance.
+
+
+## 0.3.7 blank system-font glyph crash
+
+User reported a crash on save load in 0.3.6. No matching SkyrimSE crash dump was available. Native font probing reproduced a definite out-of-bounds read: Segoe UI space has a GDI 1x1 bounding box, stride 4, but zero bitmap bytes. The HUD legend drawn on load indexed that empty vector. Blank glyph dimensions are now normalized to zero while preserving advance; drawing also explicitly skips empty buffers. Nonempty bitmap dimensions are validated against byte size. The system-font regression now exercises renderer row/column addresses for the complete legend and verifies space semantics. Live save-load confirmation remains pending.

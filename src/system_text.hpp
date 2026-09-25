@@ -9,6 +9,7 @@ inline void draw(RE::GFxValue& clip,std::string_view text,double scale,double co
  clip.Invoke("clear");double pen=0,line=0,pixel=scale/4.;
  auto vertex=[&](const char* method,double x,double y){const std::array<RE::GFxValue,2> p{RE::GFxValue(x),RE::GFxValue(y)};clip.Invoke(method,p);};
  for(unsigned char c:text){if(c=='\n'){pen=0;line+=40*pixel;continue;}const auto& g=font().get(c);
+  if(g.pixels.empty()){pen+=g.metrics.gmCellIncX*pixel;continue;}
   for(unsigned y=0;y<g.metrics.gmBlackBoxY;++y)for(unsigned x=0;x<g.metrics.gmBlackBoxX;){
    auto alpha=g.pixels[y*g.stride+x];if(!alpha){++x;continue;}auto first=x;while(x<g.metrics.gmBlackBoxX&&g.pixels[y*g.stride+x]==alpha)++x;
    const std::array<RE::GFxValue,2> fill{RE::GFxValue(color),RE::GFxValue(alpha*100./64.)};clip.Invoke("beginFill",fill);

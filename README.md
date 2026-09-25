@@ -2,7 +2,7 @@
 
 An experimental SKSE plugin that turns Skyrim Special Edition into a RuneScape-style click adventure, with an elevated orbit camera, click-to-walk, interactions and hostile-target melee orders.
 
-**Version 0.3.6. Windows x64 Skyrim runtime 1.7.104.0 only.** The plugin refuses other runtimes. This is a source repository, not a complete mod-manager-ready release.
+**Version 0.3.7. Windows x64 Skyrim runtime 1.7.104.0 only.** The plugin refuses other runtimes. This is a source repository, not a complete mod-manager-ready release.
 
 ## Features
 
@@ -117,3 +117,5 @@ Version 0.3.6 uses the installed Windows Segoe UI font at semibold weight. GDI s
 While an attack order is active, automatic defense observes the selected target's melee attack phase, facing, distance (under 180 units) and line of sight. A shield or a block-capable melee weapon with no separate offhand weapon/spell is required. Blocking starts above max(20 stamina, 20% of permanent maximum), can continue down to max(10, 10%), and releases when the threat ends, stamina is low or a 1.2-second hold expires. Cancel, menus and target changes release held controls. It does not guarantee every incoming hit is blocked.
 
 After at least three light attack attempts, a melee power attack may be attempted when no incoming attack is detected, at least max(60 stamina, 60% of permanent maximum) remains and the six-second power cooldown has elapsed. It uses native held attack input and the game's power-attack delay. Skyrim determines actual stamina costs and whether the animation succeeds; the plugin does not refill stamina or force damage. AUTO BLOCK and AUTO POWER decisions are logged. Live combat timing still needs playtesting.
+
+Version 0.3.7 fixes a load-time HUD crash in 0.3.6: GDI returns no pixel data for spaces despite a nonzero bounding box. Empty glyphs now retain spacing without attempting to draw pixels; bitmap dimensions are checked against buffer size.
