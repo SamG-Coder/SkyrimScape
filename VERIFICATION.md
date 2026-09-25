@@ -58,3 +58,8 @@ Regression coverage adds backward-anchor avoidance, occupied-target approach, ta
 ## 0.3.3 combat text
 
 Added a bounded pool of 48 floating labels, using nearby actor health deltas and TESHitEvent kHitBlocked. Gold/red distinguish other actors/player, cyan marks BLOCK. Text fades after 1.25 seconds and clears when leaving gameplay or loading a save. No attack-input damage estimates or invented blocked amounts. Native build succeeds; existing regression suites remain required. Visual placement, font availability, blocked-event timing and displayed health deltas need user gameplay validation.
+
+
+## 0.3.4 shared HUD fonts
+
+User reported missing fonts after combat testing. The 0.3.3 log confirms BLOCK and damage events for both player and enemy, so event generation is functioning. Custom labels requested device Arial/_sans with embedFonts=false. Changed combat labels to $EverywhereMediumFont and the grid legend to $EverywhereFont with embedFonts=true, using Skyrim shared font mappings (also documented in SkyUI build/fontconfig.txt). Removed the unneeded bold style request to avoid requiring a separate glyph face. No font archives or global font configuration replaced. Visual confirmation remains pending.

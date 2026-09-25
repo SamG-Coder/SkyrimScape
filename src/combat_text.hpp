@@ -62,7 +62,9 @@ inline void draw(RE::GFxValue& root,RE::NiCamera* camera,const RE::GRectF& rect,
   if(!exists){
    const std::array<RE::GFxValue,6> args{RE::GFxValue(name.c_str()),RE::GFxValue(16100.+i),RE::GFxValue(0.),RE::GFxValue(0.),RE::GFxValue(150.),RE::GFxValue(44.)};
    root.Invoke("createTextField",args);root.GetMember(name.c_str(),&label);
-   label.SetMember("embedFonts",RE::GFxValue(false));label.SetMember("selectable",RE::GFxValue(false));
+   // Use the game's shared font library and localization/font-mod mapping.
+   // Device Arial is not guaranteed to exist in Skyrim's Scaleform renderer.
+   label.SetMember("embedFonts",RE::GFxValue(true));label.SetMember("selectable",RE::GFxValue(false));
    label.SetMember("mouseEnabled",RE::GFxValue(false));
   }
   if(!label.IsDisplayObject())continue;
@@ -70,7 +72,7 @@ inline void draw(RE::GFxValue& root,RE::NiCamera* camera,const RE::GRectF& rect,
   if(visible&&camera&&i<snapshot.size()){
    const auto& p=snapshot[i];float age=std::chrono::duration<float>(now-p.born).count(),x{},y{},z{};
    if(age>=0&&age<1.25f&&camera->WorldPtToScreenPt3(p.position,x,y,z,1e-5f)&&std::isfinite(x)&&std::isfinite(y)&&x>=0&&x<=1&&y>=0&&y<=1){
-    auto html=fmt::format("<p align='center'><font face='Arial' size='24' color='{}'><b>{}</b></font></p>",p.block?"#71D9FF":p.player?"#FF6868":"#FFE8A0",p.text);
+    auto html=fmt::format("<p align='center'><font face='$EverywhereMediumFont' size='24' color='{}'>{}</font></p>",p.block?"#71D9FF":p.player?"#FF6868":"#FFE8A0",p.text);
     label.SetMember("htmlText",RE::GFxValue(html.c_str()));
     info.SetPosition(rect.left+x*(rect.right-rect.left)-75+(static_cast<int>(p.lane)-1)*20,rect.top+(1-y)*(rect.bottom-rect.top)-age*48-p.lane*14);
     info.SetAlpha(std::clamp((1.25f-age)/.4f,0.f,1.f)*100);info.SetVisible(true);

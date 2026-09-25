@@ -404,8 +404,8 @@ void drawTerrain(RE::GFxValue& root,bool visible,const std::shared_ptr<const Ter
  if(!root.GetMember("SkyrimScapeTerrainLegend",&label)){
   const std::array<RE::GFxValue,6> args{RE::GFxValue("SkyrimScapeTerrainLegend"),RE::GFxValue(15998.),RE::GFxValue(14.),RE::GFxValue(45.),RE::GFxValue(760.),RE::GFxValue(64.)};
   root.Invoke("createTextField",args);root.GetMember("SkyrimScapeTerrainLegend",&label);
-  label.SetMember("embedFonts",RE::GFxValue(false));
-  label.SetMember("htmlText",RE::GFxValue("<font face='_sans' size='16' color='#FFFFFF'>F7: GRID | 32-unit cells | 20-unit circular clearance<br/><font color='#52ED88'>GREEN: supported cells, not guaranteed routes</font> | WHITE: selected route | X-ray view</font>"));
+  label.SetMember("embedFonts",RE::GFxValue(true));
+  label.SetMember("htmlText",RE::GFxValue("<font face='$EverywhereFont' size='16' color='#FFFFFF'>F7: GRID | 32-unit cells | 20-unit circular clearance<br/><font color='#52ED88'>GREEN: supported cells, not guaranteed routes</font> | WHITE: selected route | X-ray view</font>"));
   label.SetMember("selectable",RE::GFxValue(false));
  }
  RE::GFxValue::DisplayInfo info;info.SetVisible(visible);
@@ -496,6 +496,6 @@ SKSEPluginLoad(const SKSE::LoadInterface* skse){
  SKSE::Init(skse);auto directory=SKSE::log::log_directory();if(!directory)return false;
  auto log=spdlog::basic_logger_mt("SkyrimScape",(*directory/"SkyrimScape.log").string(),true);
  spdlog::set_default_logger(log);spdlog::flush_on(spdlog::level::info);
- spdlog::info("SkyrimScape experimental 0.3.3 loaded on {}",skse->RuntimeVersion().string());
+ spdlog::info("SkyrimScape experimental 0.3.4 loaded on {}",skse->RuntimeVersion().string());
  return SKSE::GetMessagingInterface()->RegisterListener(message);
 }
