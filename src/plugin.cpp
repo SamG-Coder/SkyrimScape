@@ -7,6 +7,7 @@
 #include "native_navigation.hpp"
 #include "terrain_overlay.hpp"
 #include "combat_text.hpp"
+#include "combat_policy.hpp"
 namespace {
 using Clock=std::chrono::steady_clock;
 scape::Vec vec(RE::NiPoint3 p){return {p.x,p.y,p.z};}
@@ -14,6 +15,8 @@ RE::NiPoint3 point(scape::Vec p){return {p.x,p.y,p.z};}
 enum class Order{none,walk,interact,attack};
 struct State{
  bool enabled{},middle{},ownsMovement{},attackHeld{};
+ bool blockHeld{},powerHeld{};unsigned lightAttacks{};
+ Clock::time_point attackStarted{},attackRelease{},blockStarted{},blockUntil{},nextPower{},nextBlock{};
  bool overlay{true};Clock::time_point nextOverlay{};
  scape::Orbit orbit;
  float cursorX{.5f},cursorY{.5f};
@@ -52,15 +55,22 @@ bool gameplay(){
  for(auto name:{"Dialogue Menu","InventoryMenu","MagicMenu","ContainerMenu","BarterMenu","Crafting Menu","MapMenu","Console","TweenMenu","Main Menu","Loading Menu","RaceSex Menu","Book Menu","Lockpicking Menu"})if(ui->IsMenuOpen(name))return false;
  return camera->IsInThirdPerson()||camera->IsInFirstPerson();
 }
-void attackButton(RE::PlayerControls* controls,bool down){
+void attackButton(RE::PlayerControls* controls,bool down,float held=0.f){
  if(!controls||!controls->attackBlockHandler)return;
- auto e=RE::ButtonEvent::Create(RE::INPUT_DEVICE::kMouse,RE::UserEvents::GetSingleton()->rightAttack,0,down?1.f:0.f,down?0.f:.1f);
+ auto e=RE::ButtonEvent::Create(RE::INPUT_DEVICE::kMouse,RE::UserEvents::GetSingleton()->rightAttack,0,down?1.f:0.f,down?held:(std::max)(.1f,held));
  if(e){controls->attackBlockHandler->ProcessButton(e,&controls->data);delete e;}
  state.attackHeld=down;
+}
+void blockButton(RE::PlayerControls* controls,bool down,float held=0.f){
+ if(!controls||!controls->attackBlockHandler)return;
+ auto e=RE::ButtonEvent::Create(RE::INPUT_DEVICE::kMouse,RE::UserEvents::GetSingleton()->leftAttack,1,down?1.f:0.f,down?held:(std::max)(.1f,held));
+ if(e){controls->attackBlockHandler->ProcessButton(e,&controls->data);delete e;}state.blockHeld=down;
 }
 void cancel(RE::PlayerControls* c){
  native_navigation::gridCache().grid.abandon();state.planning=false;
  if(state.attackHeld)attackButton(c,false);
+ if(state.blockHeld)blockButton(c,false);
+ state.powerHeld=false;state.blockUntil={};
  if(c&&state.ownsMovement){c->data.moveInputVec={0,0};c->data.prevMoveVec={0,0};state.ownsMovement=false;}
  if(c&&state.runningOwned){c->data.running=state.savedRunning;state.runningOwned=false;}
  state.order=Order::none;state.target={};
@@ -239,7 +249,12 @@ void tick(RE::PlayerControls* c){
  // A streamed exterior-cell boundary is part of one journey. Interiors/world changes cancel it.
  if(!cell||worldID!=state.world||(!worldID&&cell->GetFormID()!=state.cell))cancel(c);
  state.cell=cell?cell->GetFormID():0;state.world=worldID;
- if(state.attackHeld)attackButton(c,false);if(state.order==Order::none)return;
+ if(state.attackHeld){
+  float held=std::chrono::duration<float>(Clock::now()-state.attackStarted).count();
+  if(!state.powerHeld||Clock::now()>=state.attackRelease){attackButton(c,false,held);state.powerHeld=false;}
+  else attackButton(c,true,held);
+ }
+ if(state.order==Order::none)return;
  auto now=Clock::now();auto position=vec(p->GetPosition());RE::NiPointer<RE::TESObjectREFR> target;
  if(state.order!=Order::walk){
   target=state.target.get();
@@ -247,6 +262,31 @@ void tick(RE::PlayerControls* c){
   state.destination=vec(target->GetPosition());
   if(state.order==Order::attack){auto actor=target->As<RE::Actor>();if(!actor||actor->IsDead()){spdlog::info("Attack order ended: target is dead or no longer an actor");cancel(c);return;}}
  }
+ bool incoming=false;
+ if(state.order==Order::attack){
+  auto actor=target->As<RE::Actor>();auto attack=actor->GetAttackState();
+  float facing=std::remainder(actor->GetAngleZ()-scape::heading(state.destination,position),6.2831853f);
+  bool visible=false;
+  incoming=(attack==RE::ATTACK_STATE_ENUM::kDraw||attack==RE::ATTACK_STATE_ENUM::kSwing||attack==RE::ATTACK_STATE_ENUM::kHit||attack==RE::ATTACK_STATE_ENUM::kBash)&&
+   scape::planarDistance(position,state.destination)<180.f&&std::abs(position.z-state.destination.z)<90.f&&std::abs(facing)<1.15f&&p->HasLineOfSight(target.get(),visible);
+  auto left=p->GetEquippedObject(true),right=p->GetEquippedObject(false);
+  auto weapon=right?right->As<RE::TESObjectWEAP>():nullptr;
+  auto armor=left?left->As<RE::TESObjectARMO>():nullptr;
+  bool capable=RE::ControlMap::GetSingleton()->IsFightingControlsEnabled()&&p->IsWeaponDrawn()&&((armor&&armor->IsShield())||((!left||left==right)&&weapon&&weapon->IsMelee()));
+  if(incoming)state.blockUntil=now+std::chrono::milliseconds(180);
+  float stamina=p->GetActorValue(RE::ActorValue::kStamina),maximum=p->GetPermanentActorValue(RE::ActorValue::kStamina);
+  bool defend=scape::combat::shouldBlock(incoming||(state.blockHeld&&now<state.blockUntil),capable,state.blockHeld,stamina,maximum)&&
+   !state.attackHeld&&!p->IsStaggered()&&p->GetAttackState()==RE::ATTACK_STATE_ENUM::kNone&&now>=state.nextBlock;
+  if(state.blockHeld&&now-state.blockStarted>std::chrono::milliseconds(1200)){defend=false;state.nextBlock=now+std::chrono::milliseconds(300);}
+  if(defend){
+   if(!state.blockHeld){state.blockStarted=now;spdlog::info("AUTO BLOCK target={:08X} stamina={:.1f}",actor->GetFormID(),stamina);}
+   p->SetHeading(scape::heading(position,state.destination));
+   blockButton(c,true,std::chrono::duration<float>(now-state.blockStarted).count());
+   c->data.moveInputVec={0,0};c->data.prevMoveVec={0,0};state.lastProgress=now;
+   state.nextAttack=now+std::chrono::milliseconds(250);return;
+  }
+ }
+ if(state.blockHeld){blockButton(c,false);spdlog::info("AUTO BLOCK released");}
  bool pendingTraversal=false;for(auto i=state.waypoint;i<state.traversal.size();++i)if(state.traversal[i]!=scape::nav::Traversal::walk)pendingTraversal=true;
  const bool arrived=!pendingTraversal&&state.activeTraversal==(std::numeric_limits<std::size_t>::max)()&&
   (state.order==Order::walk?(scape::reached(position,state.destination,orderRange())&&std::abs(position.z-state.destination.z)<=35.f):actionInReach(p,target.get()));
@@ -308,10 +348,19 @@ void tick(RE::PlayerControls* c){
  if(state.order==Order::interact){auto ref=target;cancel(c);const bool result=ref->ActivateRef(p,0,nullptr,1,false);spdlog::info("Activation target {:08X} returned {}",ref->GetFormID(),result);return;}
  if(!RE::ControlMap::GetSingleton()->IsFightingControlsEnabled()){cancel(c);return;}
  if(!p->IsWeaponDrawn()){p->DrawWeaponMagicHands(true);return;}
- if(now>=state.nextAttack){
+ if(now>=state.nextAttack&&!state.attackHeld&&p->GetAttackState()==RE::ATTACK_STATE_ENUM::kNone&&!p->IsStaggered()){
   auto actor=target->As<RE::Actor>();
+  auto right=p->GetEquippedObject(false);auto weapon=right?right->As<RE::TESObjectWEAP>():nullptr;
+  float stamina=p->GetActorValue(RE::ActorValue::kStamina),maximum=p->GetPermanentActorValue(RE::ActorValue::kStamina);
+  bool power=scape::combat::shouldPower(incoming,weapon&&weapon->IsMelee(),now>=state.nextPower,state.lightAttacks,stamina,maximum);
   spdlog::info("Melee input target {:08X}, range {:.1f}, target health {:.1f}",target->GetFormID(),scape::planarDistance(position,state.destination),actor?actor->GetActorValue(RE::ActorValue::kHealth):0.f);
-  attackButton(c,true);state.nextAttack=now+std::chrono::milliseconds(1000);
+  state.attackStarted=now;state.powerHeld=power;
+  if(power){
+   float delay=.5f;if(auto settings=RE::GameSettingCollection::GetSingleton())if(auto setting=settings->GetSetting("fPowerAttackDelay")){auto value=setting->GetFloat();if(std::isfinite(value)&&value>.1f&&value<2.f)delay=value;}
+   state.attackRelease=now+std::chrono::milliseconds(static_cast<int>((delay+.2f)*1000));state.nextPower=now+std::chrono::seconds(6);state.lightAttacks=0;
+   spdlog::info("AUTO POWER target={:08X} stamina={:.1f} holdSeconds={:.2f}",actor->GetFormID(),stamina,delay+.2f);
+  }else ++state.lightAttacks;
+  attackButton(c,true);state.nextAttack=now+std::chrono::milliseconds(power?1600:1000);
  }
 }
 using InputFn=RE::BSEventNotifyControl(*)(RE::PlayerControls*,RE::InputEvent* const*,RE::BSTEventSource<RE::InputEvent*>*);
@@ -417,7 +466,7 @@ void drawTerrain(RE::GFxValue& root,bool visible,const std::shared_ptr<const Ter
  if(!root.GetMember("SkyrimScapeTerrain",&layer)||!layer.IsDisplayObject())root.CreateEmptyMovieClip(&layer,"SkyrimScapeTerrain",15997);
  if(!root.GetMember("SkyrimScapeTerrainLegend",&label)){
   root.CreateEmptyMovieClip(&label,"SkyrimScapeTerrainLegend",15998);
-  vector_text::draw(label,"F7: GRID | GREEN: SUPPORTED CELLS\nWHITE: ROUTE | X-RAY VIEW",1.5,0xFFFFFF);
+  system_text::draw(label,"F7: GRID | GREEN: SUPPORTED CELLS\nWHITE: ROUTE | X-RAY VIEW",2.,0xFFFFFF);
   RE::GFxValue::DisplayInfo placement;placement.SetPosition(14,45);label.SetDisplayInfo(placement);
  }
  RE::GFxValue::DisplayInfo info;info.SetVisible(visible);
@@ -508,6 +557,6 @@ SKSEPluginLoad(const SKSE::LoadInterface* skse){
  SKSE::Init(skse);auto directory=SKSE::log::log_directory();if(!directory)return false;
  auto log=spdlog::basic_logger_mt("SkyrimScape",(*directory/"SkyrimScape.log").string(),true);
  spdlog::set_default_logger(log);spdlog::flush_on(spdlog::level::info);
- spdlog::info("SkyrimScape experimental 0.3.5 loaded on {}",skse->RuntimeVersion().string());
+ spdlog::info("SkyrimScape experimental 0.3.6 loaded on {}",skse->RuntimeVersion().string());
  return SKSE::GetMessagingInterface()->RegisterListener(message);
 }

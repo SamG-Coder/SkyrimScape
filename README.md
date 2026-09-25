@@ -2,7 +2,7 @@
 
 An experimental SKSE plugin that turns Skyrim Special Edition into a RuneScape-style click adventure, with an elevated orbit camera, click-to-walk, interactions and hostile-target melee orders.
 
-**Version 0.3.5. Windows x64 Skyrim runtime 1.7.104.0 only.** The plugin refuses other runtimes. This is a source repository, not a complete mod-manager-ready release.
+**Version 0.3.6. Windows x64 Skyrim runtime 1.7.104.0 only.** The plugin refuses other runtimes. This is a source repository, not a complete mod-manager-ready release.
 
 ## Features
 
@@ -110,3 +110,10 @@ SkyrimScape is an independent experimental project, not affiliated with Bethesda
 Combat numbers use observed health loss, including mitigation and other health-draining effects. Multiple hits between updates are combined; they are not attributed to a particular attacker. Healing does not produce damage numbers. Actors are sampled within 3000 units; newly observed actors establish a baseline first. BLOCK indicates a blocked hit, not a fabricated prevented-damage amount. Text rendering and event timing still require a live playtest.
 
 Version 0.3.5 draws combat numbers, BLOCK and the grid legend with original vector glyphs, removing the external/shared-font dependency. Ground clicks on steep or downward-facing geometry continue along the screen ray to an upward-facing surface. Ground projection is limited to 64 units downward, preventing distant overhead collisions from projecting onto the road behind the player. Rejected immediate walk requests preserve the previous walk; clear supported straight routes bypass A-star. Obstructed routes may still pause while planning.
+
+
+Version 0.3.6 uses the installed Windows Segoe UI font at semibold weight. GDI supplies anti-aliased glyph coverage, cached and drawn in the HUD without depending on Flash font loading. Original vector glyphs remain a fallback if Windows font extraction fails; no Windows font files are distributed.
+
+While an attack order is active, automatic defense observes the selected target's melee attack phase, facing, distance (under 180 units) and line of sight. A shield or a block-capable melee weapon with no separate offhand weapon/spell is required. Blocking starts above max(20 stamina, 20% of permanent maximum), can continue down to max(10, 10%), and releases when the threat ends, stamina is low or a 1.2-second hold expires. Cancel, menus and target changes release held controls. It does not guarantee every incoming hit is blocked.
+
+After at least three light attack attempts, a melee power attack may be attempted when no incoming attack is detected, at least max(60 stamina, 60% of permanent maximum) remains and the six-second power cooldown has elapsed. It uses native held attack input and the game's power-attack delay. Skyrim determines actual stamina costs and whether the animation succeeds; the plugin does not refill stamina or force damage. AUTO BLOCK and AUTO POWER decisions are logged. Live combat timing still needs playtesting.
