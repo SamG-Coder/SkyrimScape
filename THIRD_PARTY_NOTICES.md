@@ -23,3 +23,7 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+# Optional SkyScape conversion tools
+
+The tools in tools/skyscape-port use separately obtained nifly (GPL-3.0), Microsoft DirectXTex/texconv (MIT), and Python lz4. Their source checkouts and binaries are not bundled. Follow their upstream license terms if distributing converter binaries. Record-layout transformations were checked against xEdit definitions; xEdit source is not included. SkyScape, SkyUI, Skyrim and SKSE assets/scripts remain separately obtained third-party content and are not covered by this repository's license.

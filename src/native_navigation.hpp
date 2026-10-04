@@ -3,6 +3,7 @@
 #include "route_recorder.hpp"
 #include "terrain_links.hpp"
 #include "grid_navigation.hpp"
+#include "landscape_grid.hpp"
 #include <chrono>
 #include <functional>
 namespace native_navigation {
@@ -73,7 +74,17 @@ inline GridCache& refreshGrid(){
  bool changed=wid!=cache.world||(!wid&&cid!=cache.cell);
  if(changed){cache.grid.clear();cache.mesh.clear();}
  if(changed||cache.mesh.empty()||(!cache.grid.pending()&&(now-cache.refreshed>std::chrono::seconds(2)||scape::planarDistance(position,cache.focus)>256.f))){
-  cache.mesh=snapshot();cache.grid.update(cache.mesh,position);cache.focus=position;cache.refreshed=now;cache.world=wid;cache.cell=cid;
+  cache.mesh=snapshot();const auto authored=cache.mesh.size();
+  if(wid){
+   auto tes=RE::TES::GetSingleton();
+   auto terrain=scape::landscape::sample(position,2816.f,[&](float x,float y)->std::optional<float>{
+    float height{};if(!tes||!tes->GetLandHeight({x,y,position.z},height)||!std::isfinite(height))return {};
+    return height;
+   });
+   cache.mesh.insert(cache.mesh.end(),terrain.begin(),terrain.end());
+  }
+  cache.grid.update(cache.mesh,position);cache.focus=position;cache.refreshed=now;cache.world=wid;cache.cell=cid;
+  spdlog::info("GRID terrain sources world={:08X} authored={} landscape={} cells={} refreshMs={:.2f}",wid,authored,cache.mesh.size()-authored,cache.grid.statistics().cells,std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-now).count());
  }
  return cache;
 }

@@ -1,9 +1,16 @@
 #include "context_menu.hpp"
+#include "skyscape_actions.hpp"
 #include <cstdlib>
 #include <iostream>
 void require(bool p,const char* message){if(!p){std::cerr<<message<<'\n';std::exit(1);}}
 int main(){
  using namespace scape::menu;
+ using namespace scape::skyscape;
+ require(resource(0x12ca)==Resource::tree&&resource(0x33b6bc)==Resource::tree,"Scripted trees and canoe trees must offer chopping");
+ require(resource(0xbd86)==Resource::ore&&resource(0x30dd9b)==Resource::ore,"Ore and rune essence must offer mining");
+ require(resource(0)==Resource::none&&resource(0x123456)==Resource::none,"Unrelated activators must not gain weapon-hit actions");
+ require(tools(Resource::tree)==0x29c5d5&&tools(Resource::ore)==0x2a40ff,"Gathering must use the mod's native tool lists");
+ require(std::string(activationLabel(0x4bca))=="Fish"&&std::string(activationLabel(0x1c191))=="Smelt"&&std::string(activationLabel(0x302839))=="Craft runes","Activation-based skills need their own menu verbs");
  auto friendly=actorRows(false,false);require(friendly.size()==2&&friendly[0].action==Action::talk&&friendly[1].action==Action::attack,"Living non-hostile actors must offer talk and explicit attack");
  auto hostile=actorRows(false,true);require(hostile.size()==1&&hostile[0].action==Action::attack,"Hostile actors must not offer talk");
  auto dead=actorRows(true,false);require(dead.size()==1&&dead[0].action==Action::activate&&dead[0].label=="Search","Corpses must offer search rather than attack/talk");

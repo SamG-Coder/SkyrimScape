@@ -1,5 +1,6 @@
 #include "pch.hpp"
 #include "runtime_style.hpp"
+#include "anime_render.hpp"
 #include "style_gpu.hpp"
 #include "style_mesh.hpp"
 #include "roof_policy.hpp"
@@ -317,7 +318,7 @@ void install(){
  for(auto& site:sites)if(std::memcmp(reinterpret_cast<void*>(module+site.rva),site.expected.data(),6)){
   spdlog::error("Runtime style disabled: triangle submission bytes differ at {:X}",site.rva);return;
  }
- SKSE::AllocTrampoline(64);
+ SKSE::AllocTrampoline(128);
  std::array<std::array<unsigned char,6>,3> patches{};
  for(std::size_t i=0;i<sites.size();++i){
   auto slot=SKSE::GetTrampoline().allocate(sizeof(std::uintptr_t));std::memcpy(slot,&sites[i].hook,sizeof(std::uintptr_t));
@@ -339,7 +340,7 @@ void install(){
  hookExtra.operator()<2>(RE::VTABLE_BSEffectShader[0]);
  spdlog::info("Runtime style hooks installed at 3 verified triangle submission sites; F6 toggles while F8 is active. Mesh replacement disabled pending corruption investigation.");
 }
-void setGameplay(bool active){gameplay.store(active,std::memory_order_relaxed);}
+void setGameplay(bool active){gameplay.store(active,std::memory_order_relaxed);anime_render::setGameplay(active);}
 void updateRoofView(bool active,scape::Vec focus,scape::Vec camera,bool interior){
  std::lock_guard lock(roofMutex);roofViewActive=active;roofInterior=interior;roofFocus=focus;roofCamera=camera;
 }

@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.24)
+project(SkyScapePort LANGUAGES CXX)
+set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+set(NIFLY_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../external/nifly" CACHE PATH "nifly source checkout")
+add_subdirectory("${NIFLY_SOURCE_DIR}" nifly)
+add_executable(port_meshes port_meshes.cpp)
+target_link_libraries(port_meshes PRIVATE nifly)
+target_compile_features(port_meshes PRIVATE cxx_std_17)

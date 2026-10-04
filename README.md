@@ -2,7 +2,15 @@
 
 An experimental SKSE plugin that turns Skyrim Special Edition into a RuneScape-style click adventure, with an elevated orbit camera, click-to-walk, interactions and hostile-target melee orders.
 
-**Version 0.3.29. Windows x64 Skyrim runtime 1.7.104.0 only.** The plugin refuses other runtimes. This is a source repository, not a complete mod-manager-ready release.
+**Version 0.3.33. Windows x64 Skyrim runtime 1.7.104.0 only.** The plugin refuses other runtimes. This is a source repository, not a complete mod-manager-ready release.
+
+Version 0.3.33 measures gathering reach against target collision surfaces at three swing heights. Surface probes account for actual trunk/rock radius and intervening obstacles, and place approaches outside the collider. Gathering reach is held stable for the order so animation-dependent native reach cannot alternate successful swings with walking into the trunk. Live resource-distance validation is pending.
+
+Version 0.3.32 integrates SkyScape 1.2.0 gathering: script-verified trees and ores offer Chop/Mine and default left-click gathering, with Inspect/Prospect retained separately. Gathering requires a right-hand tool from the original hatchet/pickaxe form lists, approaches the trunk or clicked rock surface, faces it and sends ordinary melee input; original OnHit scripts own skill checks, XP, loot and respawn. Normal attacks only; gathering cancels when the resource disappears/is disabled or the tool changes. Fishing, smelting, prayer and runecrafting activators have specific labels. IDs are resolved against SkyScape.esm, independent of load order; other mods retain generic activation. Native resource hits are logged. Actual chopping/mining still needs an in-game playtest.
+
+Version 0.3.31 supplements authored navigation with loaded exterior landscape heights, so custom worldspaces with incomplete navmeshes can contribute terrain to the same 32-unit walking grid and F7 overlay. Native landscape samples use stable world coordinates; missing samples remain holes, and slope, circular-footprint and collision checks still apply. Regression tests cover missing authored navmesh, obstacles, missing landscape and cliffs. Live coverage and refresh timing still need a playtest.
+
+Version 0.3.30 adds an anime scene post-process, enabled with F8 and independently toggled with F4. A byte-verified 1.7.104 world-render call immediately before DrawInterfaceStart applies a full-resolution compute pass to the swap-chain scene colour: softened texture detail, cel luminance bands, increased saturation and dark contrast outlines. It runs before interface submission rather than at Present, keeping later HUD/menu draws out of the effect. It is independent of F6 asset styling and does not replace materials or geometry. Buffers are reused and rebuilt on size/format changes; render and compute state are restored. Unsupported multisampled/array/formats fail closed. Outline detection uses colour contrast, not geometric normals/depth; the sky is part of the scene too. GPU WARP tests cover output, edges, alpha, resizing and state restoration. Hook placement is executable-verified; actual in-game coverage, UI separation and performance still require a live test.
 
 Version 0.3.29 filters the verified WhiterunBraithLarsFightTrigger base 00092A6A from plugin ray queries. Exact walk goals with blocked nearest grid anchors try up to 16 nearby validated alternatives. Melee arrival uses 3D distance and a 64-unit height limit, with matching goal validation; walk waypoints cannot be consumed on a different height layer. Nearby pursuit refreshes a ground-profile/collision-validated approach every 100 ms, with A* retained for obstructed paths and explicit traversal preserved. Live stair pursuit remains to be tested.
 
@@ -76,6 +84,7 @@ Completed walks, corrected facing, the camera and the terrain overlay have been 
 | Hold middle mouse and move | Orbit and tilt |
 | Scroll down / up | Zoom out / in |
 | F7 | Toggle terrain overlay |
+| F4 | Toggle anime scene post-process (on by default in F8) |
 | F5 | Toggle camera-obstructing roof/ceiling hiding (on by default in F8) |
 | F6 | Toggle experimental runtime Old School visuals (requires F8; initially off) |
 | WASD | Cancel the order and use native movement |
@@ -169,3 +178,7 @@ While an attack order is active, automatic defense observes the selected target'
 After at least three light attack attempts, a melee power attack may be attempted when no incoming attack is detected, at least max(60 stamina, 60% of permanent maximum) remains and the six-second power cooldown has elapsed. It uses native held attack input and the game's power-attack delay. Skyrim determines actual stamina costs and whether the animation succeeds; the plugin does not refill stamina or force damage. AUTO BLOCK and AUTO POWER decisions are logged. Live combat timing still needs playtesting.
 
 Version 0.3.7 fixes a load-time HUD crash in 0.3.6: GDI returns no pixel data for spaces despite a nonzero bounding box. Empty glyphs now retain spacing without attempting to draw pixels; bitmap dimensions are checked against buffer size.
+
+### SkyScape SE conversion tools
+
+The [SkyScape port tools](tools/skyscape-port/README.md) include the record, mesh, texture and script conversion pipeline, asset audit, installer and rollback sources. Third-party mod assets are not included. SkyUI remains required; tutorial progression is not yet fully validated.

@@ -1,5 +1,6 @@
 #include "grid_navigation.hpp"
 #include "route_following.hpp"
+#include "landscape_grid.hpp"
 #include <cstdlib>
 #include <iostream>
 using namespace scape;
@@ -9,6 +10,16 @@ void rectangle(std::vector<nav::Triangle>& mesh,float x,float y,float w,float h,
 }
 int main(){
  auto clear=[](Vec,Vec,nav::Traversal){return true;};
+ auto landscape=landscape::sample({0,0,2400},512,[](float x,float y)->std::optional<float>{return 2400.f+x*.1f+y*.05f;});
+ grid::World outdoor;outdoor.update(landscape,{0,0,2400},600);
+ require(!outdoor.plan({-300,0,2370},{300,0,2430},clear,180).route.points.empty(),"Unnavmeshed outdoor landscape must produce a walking grid at physical terrain height");
+ require(!outdoor.canWalk({-300,0,2370},{300,0,2430},[](Vec,Vec,nav::Traversal){return false;}),"Landscape coverage must not bypass physical obstacles");
+ auto holes=landscape::sample({0,0,0},512,[](float x,float)->std::optional<float>{if(std::abs(x)<160)return {};return 0.f;});
+ outdoor.update(holes,{0,0,0},600);
+ require(!outdoor.projectGround({0,0,0},48),"Missing landscape samples must remain holes");
+ auto cliff=landscape::sample({0,0,0},512,[](float x,float)->std::optional<float>{return x*2;});
+ outdoor.update(cliff,{0,0,0},600);
+ require(!outdoor.canWalk({-64,0,-128},{64,0,128},clear),"Landscape cliffs must retain the grid slope limit");
  std::vector<nav::Triangle> floor;rectangle(floor,0,0,512,512,0);
  grid::World world;world.update(floor,{256,256,0},600);
  auto route=world.plan({64,64,0},{448,448,0},clear,180);

@@ -11,7 +11,9 @@
 #include "combat_policy.hpp"
 #include "route_following.hpp"
 #include "context_menu.hpp"
+#include "skyscape_actions.hpp"
 #include "runtime_style.hpp"
+#include "anime_render.hpp"
 namespace {
 using Clock=std::chrono::steady_clock;
 std::atomic_bool loadingScene{};
@@ -35,11 +37,23 @@ class LoadingMenus final:public RE::BSTEventSink<RE::MenuOpenCloseEvent>{
 }loadingMenus;
 scape::Vec vec(RE::NiPoint3 p){return {p.x,p.y,p.z};}
 RE::NiPoint3 point(scape::Vec p){return {p.x,p.y,p.z};}
-enum class Order{none,walk,interact,attack};
+enum class Order{none,walk,interact,attack,gather};
+scape::skyscape::Resource resourceKind(RE::TESObjectREFR* ref){
+ auto base=ref?ref->GetBaseObject():nullptr;if(!base)return scape::skyscape::Resource::none;
+ const auto local=base->GetFormID()&0xffffff;auto kind=scape::skyscape::resource(local);
+ auto data=RE::TESDataHandler::GetSingleton();
+ return kind!=scape::skyscape::Resource::none&&data&&data->LookupForm(local,"SkyScape.esm")==base?kind:scape::skyscape::Resource::none;
+}
+bool gatheringTool(RE::PlayerCharacter* player,RE::TESObjectREFR* target){
+ auto kind=resourceKind(target);auto data=RE::TESDataHandler::GetSingleton();
+ auto list=data?data->LookupForm<RE::BGSListForm>(scape::skyscape::tools(kind),"SkyScape.esm"):nullptr;
+ auto equipped=player->GetEquippedObject(false);
+ return kind!=scape::skyscape::Resource::none&&list&&equipped&&equipped->As<RE::TESObjectWEAP>()&&list->HasForm(equipped);
+}
 struct State{
  bool enabled{},middle{},ownsMovement{},attackHeld{};
  float lastCombatRange{};RE::FormID lastCombatWeapon{};
- bool surfaceInteraction{};scape::Vec interactionPoint{};
+ bool surfaceInteraction{};scape::Vec interactionPoint{};float gatherReach{};
  bool blockHeld{},powerHeld{},attackAwaiting{},requestedPower{};unsigned lightAttacks{};
  Clock::time_point attackStarted{},attackRelease{},blockStarted{},blockUntil{},nextPower{},nextBlock{};
  scape::combat::Motion targetMotion;RE::FormID motionTarget{};
@@ -81,6 +95,8 @@ struct RangedResponse {
 }ranged;
 class CombatHits final:public RE::BSTEventSink<RE::TESHitEvent>{
  RE::BSEventNotifyControl ProcessEvent(const RE::TESHitEvent* event,RE::BSTEventSource<RE::TESHitEvent>*)override{
+  if(event&&event->cause.get()==RE::PlayerCharacter::GetSingleton()&&resourceKind(event->target.get())!=scape::skyscape::Resource::none)
+   spdlog::info("GATHER native hit target={:08X} tool={:08X}",event->target->GetFormID(),event->source);
   if(event&&event->target.get()==RE::PlayerCharacter::GetSingleton()&&event->cause&&event->cause->As<RE::Actor>()){
    auto weapon=RE::TESForm::LookupByID<RE::TESObjectWEAP>(event->source);
    if(!weapon){auto equipped=event->cause->As<RE::Actor>()->GetEquippedObject(false);weapon=equipped?equipped->As<RE::TESObjectWEAP>():nullptr;}
@@ -177,6 +193,22 @@ Hit cast(RE::NiPoint3 start,RE::NiPoint3 end,bool logIgnored=false,bool groundOn
  alignas(16) float normal[4];_mm_store_ps(normal,pick.rayOutput.normal.quad);
  return {true,vec(start+(end-start)*pick.rayOutput.hitFraction),RE::TESHavokUtilities::FindCollidableRef(*pick.rayOutput.rootCollidable),normal[2]};
 }
+std::optional<scape::Vec> gatheringSurface(scape::Vec feet,RE::TESObjectREFR* target){
+ if(!target)return {};auto center=vec(target->GetPosition());
+ std::optional<scape::Vec> best;float nearest=(std::numeric_limits<float>::max)();
+ // Probe the actual trunk/rock at swing height, not the canopy bounding sphere.
+ // First-hit queries also prevent reaching through another object to gather.
+ for(float height:{45.f,75.f,105.f}){
+  auto from=feet+scape::Vec{0,0,height};auto to=center;to.z=from.z;
+  auto hit=cast(point(from),point(to));
+  if(hit.valid&&hit.reference==target){auto distance=scape::planarDistance(feet,hit.position);if(distance<nearest){nearest=distance;best=hit.position;}}
+ }
+ return best;
+}
+bool gatheringInReach(scape::Vec feet,RE::TESObjectREFR* target){
+ auto surface=gatheringSurface(feet,target);
+ return surface&&scape::planarDistance(feet,*surface)<=(std::max)(24.f,state.gatherReach-12.f);
+}
 bool clearTraversal(scape::Vec takeoff,scape::Vec landing,scape::nav::Traversal type){
  if(type==scape::nav::Traversal::walk){
   auto delta=landing-takeoff;float horizontal=std::hypot(delta.x,delta.y);
@@ -233,6 +265,7 @@ bool planRoute(scape::Vec position){
  auto goalVisible=[](scape::Vec approach){
   auto target=state.target.get();if(!target)return false;
   if(state.order==Order::attack&&!scape::combat::inMeleeRange(approach,state.planGoal,combatRange(RE::PlayerCharacter::GetSingleton()).strike))return false;
+  if(state.order==Order::gather)return gatheringInReach(approach,target.get());
   auto hit=cast(point(approach+scape::Vec{0,0,60}),point(state.surfaceInteraction?state.interactionPoint:state.planGoal+scape::Vec{0,0,60}));
   return !hit.valid||hit.reference==target.get();
  };
@@ -254,9 +287,11 @@ bool planRoute(scape::Vec position){
 float orderRange(){return state.order==Order::walk?24.f:state.order==Order::attack?combatRange(RE::PlayerCharacter::GetSingleton()).strike:130.f;}
 bool actionInReach(RE::PlayerCharacter* player,RE::TESObjectREFR* target){
  if(!target)return false;
- if(state.surfaceInteraction&&state.order==Order::interact){
+ if(state.order==Order::gather)return gatheringInReach(vec(player->GetPosition()),target);
+ if(state.surfaceInteraction&&(state.order==Order::interact||state.order==Order::gather)){
   auto position=vec(player->GetPosition());
   if(!scape::reached(position,state.destination,48.f)||std::abs(position.z-state.destination.z)>64.f)return false;
+  if(state.order==Order::gather&&scape::planarDistance(position,state.interactionPoint)>(std::max)(24.f,combatRange(player).strike-12.f))return false;
   auto hit=cast(point(position+scape::Vec{0,0,60}),point(state.interactionPoint));
   return !hit.valid||hit.reference==target;
  }
@@ -273,6 +308,7 @@ void issueHit(Hit hit,std::optional<Order> forced={}){
  if(keepWalking){native_navigation::gridCache().grid.abandon();state.planning=false;spdlog::info("CLICK keeps active walk while replacing destination");}
  else cancel(RE::PlayerControls::GetSingleton());
  state.destination=hit.position;state.order=Order::walk;
+ if(!forced&&resourceKind(hit.reference)!=scape::skyscape::Resource::none)forced=Order::gather;
  if(forced){state.order=*forced;if(state.order!=Order::walk){state.target=hit.reference->GetHandle();state.destination=vec(hit.reference->GetPosition());}}
  else if(hit.reference&&hit.reference->GetBaseObject()){
   auto actor=hit.reference->As<RE::Actor>();auto type=hit.reference->GetBaseObject()->GetFormType();
@@ -280,13 +316,25 @@ void issueHit(Hit hit,std::optional<Order> forced={}){
   else if(actor||type==RE::FormType::Door||type==RE::FormType::Container||type==RE::FormType::Activator||type==RE::FormType::Furniture||hit.reference->GetBaseObject()->IsInventoryObject())state.order=Order::interact;
   if(state.order!=Order::walk){state.target=hit.reference->GetHandle();state.destination=vec(hit.reference->GetPosition());}
  }
- if(state.order==Order::interact&&hit.reference&&!hit.reference->As<RE::Actor>()){
+ if(state.order==Order::gather&&!gatheringTool(p,hit.reference)){
+  RE::SendHUDMessage::ShowHUDMessage(resourceKind(hit.reference)==scape::skyscape::Resource::tree?"Equip a SkyScape hatchet in your right hand to chop.":"Equip a SkyScape pickaxe in your right hand to mine.");
+  spdlog::info("GATHER rejected: missing tool target={:08X}",hit.reference->GetFormID());rejectedClick();cancel(RE::PlayerControls::GetSingleton());return;
+ }
+ if(state.order==Order::gather)state.gatherReach=combatRange(p).strike;
+ if((state.order==Order::interact||state.order==Order::gather)&&hit.reference&&!hit.reference->As<RE::Actor>()){
+  // A tree's branch/canopy can be far from the trunk that must receive the hit.
+  if(state.order==Order::gather){
+   auto surface=gatheringSurface(vec(p->GetPosition()),hit.reference);
+   if(surface)hit.position=*surface;
+   spdlog::info("GATHER surface target={:08X} sampled={} radius={:.1f} surfaceDistance={:.1f} reach={:.1f}",hit.reference->GetFormID(),bool(surface),scape::planarDistance(hit.position,vec(hit.reference->GetPosition())),scape::planarDistance(vec(p->GetPosition()),hit.position),state.gatherReach);
+  }
   state.surfaceInteraction=true;state.interactionPoint=hit.position;
   auto feet=vec(p->GetPosition());
   // Pick at body height for tall doors, not at their distant pivot or lintel.
   state.interactionPoint.z=std::clamp(hit.position.z,feet.z+30.f,feet.z+100.f);
   auto towardPlayer=feet-hit.position;towardPlayer.z=0;auto distance=towardPlayer.length();
-  auto approach=hit.position;if(distance>1)approach=approach+towardPlayer*(48.f/distance);
+  const float standOff=state.order==Order::gather?std::clamp(state.gatherReach*.5f,20.f,48.f):48.f;
+  auto approach=hit.position;if(distance>1)approach=approach+towardPlayer*(standOff/distance);
   approach.z=feet.z;
   auto floor=scape::nav::surface(native_navigation::refreshGrid().mesh,approach,96.f,256.f,96.f);
   if(!floor){spdlog::info("INTERACT no approach surface target={:08X} picked={:.1f},{:.1f},{:.1f}",hit.reference->GetFormID(),hit.position.x,hit.position.y,hit.position.z);rejectedClick();cancel(RE::PlayerControls::GetSingleton());return;}
@@ -364,7 +412,15 @@ void openContextMenu(){
   else if(type==RE::FormType::Container)menu.rows.push_back({scape::menu::Action::activate,"Open"});
   else if(ref->GetBaseObject()->IsInventoryObject())menu.rows.push_back({scape::menu::Action::activate,"Take"});
   else if(type==RE::FormType::Furniture)menu.rows.push_back({scape::menu::Action::activate,"Use"});
-  else if(type==RE::FormType::Activator)menu.rows.push_back({scape::menu::Action::activate,"Activate"});
+  else if(type==RE::FormType::Activator){
+   auto kind=resourceKind(ref);
+   if(kind!=scape::skyscape::Resource::none){menu.rows.push_back({scape::menu::Action::gather,scape::skyscape::label(kind)});menu.rows.push_back({scape::menu::Action::activate,kind==scape::skyscape::Resource::ore?"Prospect":"Inspect"});}
+   else {
+    auto base=ref->GetBaseObject();auto local=base->GetFormID()&0xffffff;auto data=RE::TESDataHandler::GetSingleton();
+    auto label=data&&data->LookupForm(local,"SkyScape.esm")==base?scape::skyscape::activationLabel(local):"Activate";
+    menu.rows.push_back({scape::menu::Action::activate,label});
+   }
+  }
  }
  auto doors=doorsUnderCursor(start,start+direction*12000.f);
  for(const auto& door:doors){
@@ -395,10 +451,11 @@ void selectContextMenu(){
  if(row.target&&(!target->GetBaseObject()||target->GetBaseObject()->GetFormType()!=RE::FormType::Door)){rejectedClick();return;}
  auto actor=target->As<RE::Actor>();
  if(row.action==scape::menu::Action::attack&&(!actor||actor->IsDead())){rejectedClick();return;}
+ if(row.action==scape::menu::Action::gather&&resourceKind(target.get())==scape::skyscape::Resource::none){rejectedClick();return;}
  if(row.action==scape::menu::Action::talk&&(!actor||actor->IsDead()||actor->IsHostileToActor(player)||!actor->CanTalkToPlayer())){rejectedClick();return;}
  spdlog::info("CONTEXT selected {} target={:08X}",row.label,target->GetFormID());
  auto picked=menu.surfaces.find(target->GetFormID());
- issueHit({true,picked!=menu.surfaces.end()?picked->second:vec(target->GetPosition()),target.get(),1.f},row.action==scape::menu::Action::attack?Order::attack:Order::interact);
+ issueHit({true,picked!=menu.surfaces.end()?picked->second:vec(target->GetPosition()),target.get(),1.f},row.action==scape::menu::Action::attack?Order::attack:row.action==scape::menu::Action::gather?Order::gather:Order::interact);
  state.talkOnly=row.action==scape::menu::Action::talk;
 }
 bool followTraversal(RE::PlayerControls* controls,scape::Vec position){
@@ -531,6 +588,7 @@ void tick(RE::PlayerControls* c){
  if(state.order!=Order::walk){
   target=state.target.get();
   if(!target||!target->Get3D()||target->GetWorldspace()!=world||(!world&&target->GetParentCell()!=cell)){cancel(c);return;}
+  if(state.order==Order::gather&&(target->IsDisabled()||!gatheringTool(p,target.get()))){spdlog::info("GATHER ended: depleted/unavailable target or tool changed");cancel(c);return;}
   if(!state.surfaceInteraction)state.destination=vec(target->GetPosition());
   if(state.talkOnly){auto actor=target->As<RE::Actor>();if(!actor||actor->IsDead()||actor->IsHostileToActor(p)||!actor->CanTalkToPlayer()){cancel(c);return;}}
   if(state.order==Order::attack){auto actor=target->As<RE::Actor>();if(!actor||actor->IsDead()){spdlog::info("Attack order ended: target is dead or no longer an actor");cancel(c);return;}}
@@ -717,7 +775,7 @@ void tick(RE::PlayerControls* c){
  state.lastPosition=position;state.lastProgress=now;
  if(state.order==Order::attack){native_navigation::gridCache().grid.abandon();state.planning=false;state.route.clear();state.traversal.clear();state.waypoint=0;state.nextPlan={};}
  if(state.runningOwned){c->data.running=state.savedRunning;state.runningOwned=false;}
- if(state.order!=Order::walk)p->SetHeading(scape::heading(position,state.destination));
+ if(state.order!=Order::walk)p->SetHeading(scape::heading(position,state.order==Order::gather?state.interactionPoint:state.destination));
  if(state.order==Order::walk){spdlog::info("Walk destination reached");cancel(c);return;}
  if(state.order==Order::interact){
   auto ref=target;auto id=ref->GetFormID();bool door=ref->GetBaseObject()&&ref->GetBaseObject()->GetFormType()==RE::FormType::Door;cancel(c);
@@ -734,7 +792,7 @@ void tick(RE::PlayerControls* c){
   auto actor=target->As<RE::Actor>();
   auto right=p->GetEquippedObject(false);auto weapon=right?right->As<RE::TESObjectWEAP>():nullptr;
   float stamina=p->GetActorValue(RE::ActorValue::kStamina),maximum=p->GetPermanentActorValue(RE::ActorValue::kStamina);
-  bool power=scape::combat::shouldPower(incoming,weapon&&weapon->IsMelee(),now>=state.nextPower,state.lightAttacks,stamina,maximum);
+  bool power=state.order==Order::attack&&scape::combat::shouldPower(incoming,weapon&&weapon->IsMelee(),now>=state.nextPower,state.lightAttacks,stamina,maximum);
   spdlog::info("Melee input target {:08X}, range {:.1f} allowed {:.1f}, target health {:.1f}",target->GetFormID(),scape::planarDistance(position,vec(target->GetPosition())),orderRange(),actor?actor->GetActorValue(RE::ActorValue::kHealth):0.f);
   float delay=.5f;if(auto settings=RE::GameSettingCollection::GetSingleton())if(auto setting=settings->GetSetting("fPowerAttackDelay")){auto value=setting->GetFloat();if(std::isfinite(value)&&value>.1f&&value<2.f)delay=value;}
   state.attackStarted=now;state.powerHeld=power;state.requestedPower=power;state.attackAwaiting=true;
@@ -760,6 +818,7 @@ RE::BSEventNotifyControl input(RE::PlayerControls* c,RE::InputEvent* const* even
   auto next=e->next;bool consume=false;
   if(auto b=e->AsButtonEvent()){
    auto id=b->GetIDCode();
+   if(state.enabled&&e->GetDevice()==RE::INPUT_DEVICE::kKeyboard&&id==0x3E&&b->IsDown()){anime_render::toggle();consume=true;}
    if(state.enabled&&e->GetDevice()==RE::INPUT_DEVICE::kKeyboard&&id==0x3F&&b->IsDown()){
     runtime_style::toggleRoofs();consume=true;
    }
@@ -1006,6 +1065,7 @@ void message(SKSE::MessagingInterface::Message* e){
  if(e->type==SKSE::MessagingInterface::kDataLoaded){
   RE::UI::GetSingleton()->AddEventSink<RE::MenuOpenCloseEvent>(&loadingMenus);
   runtime_style::install();
+  anime_render::install();
   RE::ScriptEventSourceHolder::GetSingleton()->AddEventSink<RE::TESHitEvent>(&combat_text::hits);
   RE::ScriptEventSourceHolder::GetSingleton()->AddEventSink<RE::TESHitEvent>(&combatHits);
   REL::Relocation<std::uintptr_t> controls{RE::VTABLE_PlayerControls[0]};originalInput=controls.write_vfunc(1,input);
@@ -1022,6 +1082,6 @@ SKSEPluginLoad(const SKSE::LoadInterface* skse){
  SKSE::Init(skse);auto directory=SKSE::log::log_directory();if(!directory)return false;
  auto log=spdlog::basic_logger_mt("SkyrimScape",(*directory/"SkyrimScape.log").string(),true);
  spdlog::set_default_logger(log);spdlog::flush_on(spdlog::level::info);
- spdlog::info("SkyrimScape experimental 0.3.29 loaded on {}",skse->RuntimeVersion().string());
+ spdlog::info("SkyrimScape experimental 0.3.33 loaded on {}",skse->RuntimeVersion().string());
  return SKSE::GetMessagingInterface()->RegisterListener(message);
 }

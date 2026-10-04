@@ -4,7 +4,7 @@
 #include <string>
 #include <vector>
 namespace scape::menu {
-enum class Action{walk,attack,talk,activate,stop,close};
+enum class Action{walk,attack,talk,activate,gather,stop,close};
 struct Row{Action action;std::string label;std::uint32_t target{};};
 inline std::vector<Row> actorRows(bool dead,bool hostile,bool canTalk=true){
  if(dead)return {{Action::activate,"Search"}};
